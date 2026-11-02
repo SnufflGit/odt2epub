@@ -719,11 +719,11 @@ def main():
     )
     
     parser.add_argument('-i', '--input', required=True, help='Путь к входному ODT файлу')
-    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG)')
-    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла')
+    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT, с расширением .jpg или .png')
+    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (по умолчанию: имя ODT + .epub)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
-    parser.add_argument('-l', '--lang', default='ru', help='Язык книги (ISO 639-1, по умолчанию: ru)')
+    parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
     
     args = parser.parse_args()
     
@@ -744,7 +744,9 @@ def main():
     # Проверяем обложку
     cover_buffer = None
     cover_mime_type = None
+    
     if args.cover:
+        # Указан явно
         cover_path = os.path.abspath(args.cover)
         if not os.path.exists(cover_path):
             log_error(f'Файл обложки не найден: {cover_path}')
@@ -756,6 +758,22 @@ def main():
         ext = Path(cover_path).suffix.lower()
         cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
         log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
+    else:
+        # Автопоиск обложки: файл с тем же именем, что и ODT, с расширением .jpg/.png
+        odt_stem = Path(input_path).stem
+        odt_dir = Path(input_path).parent
+        
+        for ext in ('.jpg', '.jpeg', '.png'):
+            candidate = odt_dir / f'{odt_stem}{ext}'
+            if candidate.exists():
+                cover_path = str(candidate)
+                with open(cover_path, 'rb') as f:
+                    cover_buffer = f.read()
+                cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+                log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
+                break
+        else:
+            log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
     
     # Определяем выходной путь
     output_path = os.path.abspath(args.output) if args.output else input_path.replace('.odt', '.epub').replace('.ODT', '.epub')
@@ -790,7 +808,7 @@ def main():
         'title': title,
         'author': author,
         'date': meta['date'],
-        'language': args.lang,
+        'language': args.lang or 'und',
         'cover_image': cover_buffer,
         'cover_mime_type': cover_mime_type,
     })
@@ -807,7 +825,8 @@ def main():
     print('\n  ┌──────────────────────────────────────────┐')
     print(f'  │  📖 {title}')
     print(f'  │  ✍️  {author}')
-    print(f'  │  🌐 {args.lang.upper()}')
+    if args.lang:
+        print(f'  │  🌐 {args.lang.upper()}')
     print(f'  │  📦 {epub_size_kb:.1f} КБ')
     print(f'  │  📁 {os.path.basename(output_path)}')
     print('  └──────────────────────────────────────────┘')

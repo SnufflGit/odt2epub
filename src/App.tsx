@@ -88,11 +88,11 @@ function App() {
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm space-y-3">
             <div>
-              <div className="text-slate-400"># Базовая конвертация</div>
+              <div className="text-slate-400"># Базовая конвертация (обложка ищется автоматически)</div>
               <div className="text-yellow-300">python convert.py -i document.odt</div>
             </div>
             <div>
-              <div className="text-slate-400"># С обложкой</div>
+              <div className="text-slate-400"># С явной обложкой</div>
               <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg</div>
             </div>
             <div>
@@ -128,7 +128,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-c, --cover</td>
-                  <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG)</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
@@ -148,7 +148,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-l, --lang</td>
-                  <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: ru)</td>
+                  <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: пусто)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
               </tbody>
