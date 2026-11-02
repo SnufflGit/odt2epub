@@ -1,344 +1,212 @@
-import { useState, useCallback } from 'react';
-import { parseODT, parseStyles, parseContentStyles, extractMeta } from './utils/odtParser';
-import { convertODTToXHTML } from './utils/odtToXhtml';
-import { generateEpub, downloadEpub } from './utils/epubGenerator';
-
-type ConvertStatus = 'idle' | 'loading' | 'converting' | 'done' | 'error';
-
 function App() {
-  const [odtFile, setOdtFile] = useState<File | null>(null);
-  const [coverFile, setCoverFile] = useState<File | null>(null);
-  const [coverPreview, setCoverPreview] = useState<string | null>(null);
-  const [title, setTitle] = useState('');
-  const [author, setAuthor] = useState('');
-  const [language, setLanguage] = useState('ru');
-  const [status, setStatus] = useState<ConvertStatus>('idle');
-  const [errorMessage, setErrorMessage] = useState('');
-  const [progress, setProgress] = useState('');
-
-  const handleOdtChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setOdtFile(file);
-      // Try to extract title from file
-      if (!title) {
-        setTitle(file.name.replace(/\.odt$/i, ''));
-      }
-    }
-  }, [title]);
-
-  const handleCoverChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setCoverFile(file);
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        setCoverPreview(ev.target?.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
-  }, []);
-
-  const handleConvert = useCallback(async () => {
-    if (!odtFile) {
-      setErrorMessage('Пожалуйста, выберите ODT файл');
-      setStatus('error');
-      return;
-    }
-
-    try {
-      setStatus('loading');
-      setProgress('Чтение ODT файла...');
-
-      // Parse ODT
-      const odtContent = await parseODT(odtFile);
-      
-      setProgress('Анализ стилей...');
-      const stylesMap = parseStyles(odtContent.stylesXml);
-      const autoStylesMap = parseContentStyles(odtContent.contentXml);
-      
-      // Extract metadata
-      const meta = extractMeta(odtContent.metaXml);
-      if (!title) setTitle(meta.title);
-      if (!author) setAuthor(meta.author);
-
-      setStatus('converting');
-      setProgress('Конвертация содержимого...');
-
-      // Convert to XHTML
-      const convertResult = convertODTToXHTML(
-        odtContent.contentXml,
-        stylesMap,
-        autoStylesMap,
-        odtContent.images
-      );
-
-      setProgress('Создание EPUB...');
-
-      // Get cover image data
-      let coverImageData: Uint8Array | undefined;
-      let coverMimeType: string | undefined;
-      if (coverFile) {
-        const buffer = await coverFile.arrayBuffer();
-        coverImageData = new Uint8Array(buffer);
-        coverMimeType = coverFile.type;
-      }
-
-      // Generate EPUB
-      const epubBlob = await generateEpub(convertResult, {
-        title: title || meta.title || 'Untitled',
-        author: author || meta.author || 'Unknown',
-        date: meta.date,
-        language,
-        coverImage: coverImageData,
-        coverMimeType,
-      });
-
-      setProgress('Скачивание...');
-      const filename = (title || meta.title || 'document').replace(/[^a-zA-Zа-яА-Я0-9_-]/g, '_') + '.epub';
-      downloadEpub(epubBlob, filename);
-
-      setStatus('done');
-      setProgress('');
-    } catch (err) {
-      console.error(err);
-      setErrorMessage(err instanceof Error ? err.message : 'Произошла ошибка при конвертации');
-      setStatus('error');
-      setProgress('');
-    }
-  }, [odtFile, coverFile, title, author, language]);
-
-  const handleReset = () => {
-    setOdtFile(null);
-    setCoverFile(null);
-    setCoverPreview(null);
-    setTitle('');
-    setAuthor('');
-    setStatus('idle');
-    setErrorMessage('');
-    setProgress('');
-  };
-
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
-      <div className="container mx-auto px-4 py-8 max-w-4xl">
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
+      <div className="container mx-auto px-4 py-10 max-w-4xl">
+        
         {/* Header */}
-        <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-purple-600/30 backdrop-blur-sm mb-4">
-            <svg className="w-8 h-8 text-purple-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-            </svg>
+        <div className="text-center mb-12">
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-emerald-500/20 border border-emerald-500/30 mb-5">
+            <span className="text-4xl">⚡</span>
           </div>
-          <h1 className="text-4xl font-bold text-white mb-2">
-            ODT → EPUB Конвертер
+          <h1 className="text-5xl font-bold mb-3 bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+            odt2epub
           </h1>
-          <p className="text-purple-200/70 text-lg">
-            Конвертация документов ODT в формат EPUB с сохранением форматирования
+          <p className="text-xl text-slate-400">
+            Консольная утилита для конвертации ODT → EPUB
+          </p>
+          <p className="text-sm text-slate-500 mt-2">
+            Сохранение форматирования • Обложка JPEG/PNG • Встроенные изображения
           </p>
         </div>
 
-        {/* Main Card */}
-        <div className="bg-white/5 backdrop-blur-xl rounded-3xl border border-white/10 p-8 shadow-2xl">
-          
-          {/* File Upload Section */}
-          <div className="grid md:grid-cols-2 gap-6 mb-8">
-            {/* ODT File Upload */}
-            <div>
-              <label className="block text-sm font-medium text-purple-200 mb-2">
-                📄 ODT Документ
-              </label>
-              <div className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition-all cursor-pointer hover:border-purple-400 hover:bg-purple-500/5 ${
-                odtFile ? 'border-green-400/50 bg-green-500/5' : 'border-white/20'
-              }`}>
-                <input
-                  type="file"
-                  accept=".odt"
-                  onChange={handleOdtChange}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-                {odtFile ? (
-                  <div>
-                    <div className="text-3xl mb-2">✅</div>
-                    <p className="text-green-300 font-medium text-sm truncate">{odtFile.name}</p>
-                    <p className="text-green-400/60 text-xs mt-1">
-                      {(odtFile.size / 1024).toFixed(1)} КБ
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="text-3xl mb-2">📁</div>
-                    <p className="text-purple-200/80 text-sm">Нажмите или перетащите ODT файл</p>
-                    <p className="text-purple-300/50 text-xs mt-1">Поддерживается формат .odt</p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Cover Image Upload */}
-            <div>
-              <label className="block text-sm font-medium text-purple-200 mb-2">
-                🖼️ Обложка (JPEG/PNG)
-              </label>
-              <div className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition-all cursor-pointer hover:border-purple-400 hover:bg-purple-500/5 ${
-                coverFile ? 'border-green-400/50 bg-green-500/5' : 'border-white/20'
-              }`}>
-                <input
-                  type="file"
-                  accept="image/jpeg,image/jpg,image/png"
-                  onChange={handleCoverChange}
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                />
-                {coverPreview ? (
-                  <div>
-                    <img src={coverPreview} alt="Cover preview" className="w-16 h-20 object-cover rounded-lg mx-auto mb-2 shadow-lg" />
-                    <p className="text-green-300 font-medium text-xs truncate">{coverFile?.name}</p>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="text-3xl mb-2">🎨</div>
-                    <p className="text-purple-200/80 text-sm">Загрузите обложку (необязательно)</p>
-                    <p className="text-purple-300/50 text-xs mt-1">JPEG или PNG</p>
-                  </div>
-                )}
-              </div>
-            </div>
+        {/* Terminal Preview */}
+        <div className="mb-10 rounded-2xl overflow-hidden border border-slate-700 shadow-2xl">
+          <div className="bg-slate-800 px-4 py-3 flex items-center gap-2 border-b border-slate-700">
+            <div className="w-3 h-3 rounded-full bg-red-500"></div>
+            <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+            <div className="w-3 h-3 rounded-full bg-green-500"></div>
+            <span className="ml-3 text-sm text-slate-400 font-mono">Terminal</span>
           </div>
+          <div className="bg-slate-900 p-6 font-mono text-sm leading-relaxed overflow-x-auto">
+            <div className="text-emerald-400">$ node convert.js -i book.odt -c cover.jpg -o book.epub</div>
+            <div className="text-slate-400 mt-3">
+              <pre className="whitespace-pre-wrap">{`
+  ╔══════════════════════════════════════════╗
+  ║       ODT → EPUB Converter v1.0.0       ║
+  ╚══════════════════════════════════════════╝
 
-          {/* Metadata Section */}
-          <div className="grid md:grid-cols-3 gap-4 mb-8">
-            <div>
-              <label className="block text-sm font-medium text-purple-200 mb-2">
-                Название книги
-              </label>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Введите название..."
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-purple-300/40 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-transparent transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-purple-200 mb-2">
-                Автор
-              </label>
-              <input
-                type="text"
-                value={author}
-                onChange={(e) => setAuthor(e.target.value)}
-                placeholder="Имя автора..."
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-purple-300/40 focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-transparent transition-all"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-purple-200 mb-2">
-                Язык
-              </label>
-              <select
-                value={language}
-                onChange={(e) => setLanguage(e.target.value)}
-                className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 focus:border-transparent transition-all"
-              >
-                <option value="ru" className="bg-slate-800">Русский</option>
-                <option value="en" className="bg-slate-800">English</option>
-                <option value="de" className="bg-slate-800">Deutsch</option>
-                <option value="fr" className="bg-slate-800">Français</option>
-                <option value="es" className="bg-slate-800">Español</option>
-                <option value="uk" className="bg-slate-800">Українська</option>
-              </select>
-            </div>
-          </div>
+  ✅ Обложка: cover.jpg (image/jpeg)
 
-          {/* Progress / Status */}
-          {(status === 'loading' || status === 'converting') && (
-            <div className="mb-6 p-4 bg-blue-500/10 border border-blue-400/20 rounded-xl">
-              <div className="flex items-center gap-3">
-                <div className="animate-spin w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full"></div>
-                <span className="text-blue-200">{progress}</span>
-              </div>
-              <div className="mt-3 w-full bg-blue-900/30 rounded-full h-2">
-                <div className="bg-blue-400 h-2 rounded-full transition-all duration-500 animate-pulse" style={{width: status === 'converting' ? '70%' : '30%'}}></div>
-              </div>
-            </div>
-          )}
+  [1/5] Чтение ODT файла...
+  ✅ ODT прочитан (изображений в документе: 3)
 
-          {status === 'done' && (
-            <div className="mb-6 p-4 bg-green-500/10 border border-green-400/20 rounded-xl">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🎉</span>
-                <span className="text-green-200 font-medium">EPUB файл успешно создан и скачан!</span>
-              </div>
-            </div>
-          )}
+  [2/5] Анализ стилей...
+  ✅ Стили: 24 из styles.xml, 12 из content.xml
+  ✅ Метаданные: "Моя книга" — Иван Иванов
 
-          {status === 'error' && (
-            <div className="mb-6 p-4 bg-red-500/10 border border-red-400/20 rounded-xl">
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">❌</span>
-                <span className="text-red-200">{errorMessage}</span>
-              </div>
-            </div>
-          )}
+  [3/5] Конвертация содержимого в XHTML...
+  ✅ XHTML сгенерирован (15420 символов, 3 изображений)
 
-          {/* Action Buttons */}
-          <div className="flex gap-4">
-            <button
-              onClick={handleConvert}
-              disabled={!odtFile || status === 'loading' || status === 'converting'}
-              className="flex-1 py-4 px-6 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:from-gray-600 disabled:to-gray-700 disabled:cursor-not-allowed text-white font-semibold rounded-xl shadow-lg shadow-purple-500/25 transition-all duration-200 transform hover:scale-[1.02] active:scale-[0.98]"
-            >
-              {status === 'loading' || status === 'converting' ? (
-                <span className="flex items-center justify-center gap-2">
-                  <div className="animate-spin w-5 h-5 border-2 border-white border-t-transparent rounded-full"></div>
-                  Конвертация...
-                </span>
-              ) : (
-                <span className="flex items-center justify-center gap-2">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  Конвертировать в EPUB
-                </span>
-              )}
-            </button>
-            
-            <button
-              onClick={handleReset}
-              className="py-4 px-6 bg-white/5 hover:bg-white/10 border border-white/10 text-purple-200 font-medium rounded-xl transition-all duration-200"
-            >
-              Сброс
-            </button>
+  [4/5] Сборка EPUB...
+  ✅ EPUB собран (245.3 КБ)
+
+  [5/5] Сохранение файла...
+  ✅ Файл сохранён: /home/user/book.epub
+
+  ┌──────────────────────────────────────────┐
+  │  📖 Моя книга
+  │  ✍️  Иван Иванов
+  │  🌐 RU
+  │  📦 245.3 КБ
+  │  📁 book.epub
+  └──────────────────────────────────────────┘
+
+  ✅ Конвертация завершена!`}</pre>
+            </div>
           </div>
         </div>
 
-        {/* Info Section */}
-        <div className="mt-8 grid md:grid-cols-3 gap-4">
-          <div className="bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10 p-5">
-            <div className="text-2xl mb-2">📝</div>
-            <h3 className="text-white font-medium mb-1">Форматирование</h3>
-            <p className="text-purple-200/60 text-sm">
-              Сохраняются заголовки, списки, таблицы, жирный/курсив/подчёркивание
-            </p>
+        {/* Installation */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-emerald-400">📦</span> Установка
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5">
+            <div className="font-mono text-sm">
+              <div className="text-slate-400"># Установить зависимости</div>
+              <div className="text-emerald-300 mt-1">npm install jszip commander @xmldom/xmldom</div>
+            </div>
           </div>
-          <div className="bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10 p-5">
-            <div className="text-2xl mb-2">🖼️</div>
-            <h3 className="text-white font-medium mb-1">Изображения</h3>
-            <p className="text-purple-200/60 text-sm">
-              Встроенные изображения из ODT переносятся в EPUB
-            </p>
+        </div>
+
+        {/* Usage */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-emerald-400">🚀</span> Использование
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm space-y-3">
+            <div>
+              <div className="text-slate-400"># Базовая конвертация</div>
+              <div className="text-emerald-300">node convert.js -i document.odt</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># С обложкой</div>
+              <div className="text-emerald-300">node convert.js -i document.odt -c cover.jpg</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Полные параметры</div>
+              <div className="text-emerald-300">node convert.js -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Показать справку</div>
+              <div className="text-emerald-300">node convert.js --help</div>
+            </div>
           </div>
-          <div className="bg-white/5 backdrop-blur-sm rounded-2xl border border-white/10 p-5">
-            <div className="text-2xl mb-2">📚</div>
-            <h3 className="text-white font-medium mb-1">Обложка</h3>
-            <p className="text-purple-200/60 text-sm">
-              JPEG/PNG изображение будет использовано как обложка книги
-            </p>
+        </div>
+
+        {/* Options Table */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-emerald-400">⚙️</span> Параметры
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700 bg-slate-800">
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">Флаг</th>
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">Описание</th>
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">Обязательный</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-i, --input</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к входному ODT файлу</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-red-500/20 text-red-300 rounded text-xs">Да</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-c, --cover</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-o, --output</td>
+                  <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (по умолчанию: имя ODT + .epub)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-t, --title</td>
+                  <td className="px-5 py-3 text-slate-300">Название книги (по умолчанию из метаданных ODT)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-a, --author</td>
+                  <td className="px-5 py-3 text-slate-300">Автор книги (по умолчанию из метаданных ODT)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-emerald-400">-l, --lang</td>
+                  <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: ru)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Features */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-emerald-400">✨</span> Возможности
+          </h2>
+          <div className="grid md:grid-cols-2 gap-4">
+            {[
+              { icon: '📝', title: 'Форматирование', desc: 'Заголовки, абзацы, жирный, курсив, подчёркивание, зачёркивание, цвет текста' },
+              { icon: '📊', title: 'Таблицы', desc: 'Полная поддержка таблиц с объединением ячеек' },
+              { icon: '📋', title: 'Списки', desc: 'Маркированные и нумерованные списки' },
+              { icon: '🖼️', title: 'Изображения', desc: 'Встроенные изображения из ODT переносятся в EPUB' },
+              { icon: '🎨', title: 'Обложка', desc: 'JPEG/PNG обложка с отдельной страницей' },
+              { icon: '🔗', title: 'Ссылки', desc: 'Гиперссылки сохраняются' },
+              { icon: '📐', title: 'Стили', desc: 'CSS-стили генерируются из ODT-стилей' },
+              { icon: '📚', title: 'Метаданные', desc: 'Автор, название, язык, дата из ODT или CLI' },
+            ].map((item, i) => (
+              <div key={i} className="bg-slate-800/30 border border-slate-700/50 rounded-xl p-4 flex gap-3">
+                <span className="text-2xl">{item.icon}</span>
+                <div>
+                  <h3 className="font-medium text-white">{item.title}</h3>
+                  <p className="text-sm text-slate-400 mt-0.5">{item.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* EPUB Structure */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-emerald-400">📁</span> Структура EPUB
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm">
+            <pre className="text-slate-300">{`book.epub (ZIP-архив)
+├── mimetype
+├── META-INF/
+│   └── container.xml
+└── OEBPS/
+    ├── content.opf        (манифест книги)
+    ├── toc.ncx            (таблица содержимого)
+    ├── style.css          (стили документа)
+    ├── cover.xhtml        (страница обложки)
+    ├── chapter1.xhtml     (содержимое)
+    └── images/
+        ├── cover.jpg      (обложка)
+        └── img_0.jpg      (изображения из ODT)`}</pre>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="text-center mt-8 text-purple-300/40 text-sm">
-          Конвертация выполняется полностью в браузере. Файлы не загружаются на сервер.
+        <div className="text-center text-slate-500 text-sm pt-8 border-t border-slate-800">
+          <p>ODT → EPUB Converter CLI • Node.js</p>
+          <p className="mt-1">Файл: <code className="text-emerald-400/70 bg-slate-800 px-2 py-0.5 rounded">convert.js</code></p>
         </div>
       </div>
     </div>
