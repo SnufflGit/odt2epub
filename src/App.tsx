@@ -5,14 +5,14 @@ function App() {
         
         {/* Header */}
         <div className="text-center mb-12">
-          <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-emerald-500/20 border border-emerald-500/30 mb-5">
-            <span className="text-4xl">⚡</span>
+          <div className="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-yellow-500/20 border border-yellow-500/30 mb-5">
+            <span className="text-4xl">🐍</span>
           </div>
-          <h1 className="text-5xl font-bold mb-3 bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+          <h1 className="text-5xl font-bold mb-3 bg-gradient-to-r from-yellow-400 to-orange-400 bg-clip-text text-transparent">
             odt2epub
           </h1>
           <p className="text-xl text-slate-400">
-            Консольная утилита для конвертации ODT → EPUB
+            Python CLI для конвертации ODT → EPUB
           </p>
           <p className="text-sm text-slate-500 mt-2">
             Сохранение форматирования • Обложка JPEG/PNG • Встроенные изображения
@@ -28,7 +28,7 @@ function App() {
             <span className="ml-3 text-sm text-slate-400 font-mono">Terminal</span>
           </div>
           <div className="bg-slate-900 p-6 font-mono text-sm leading-relaxed overflow-x-auto">
-            <div className="text-emerald-400">$ node convert.js -i book.odt -c cover.jpg -o book.epub</div>
+            <div className="text-yellow-400">$ python convert.py -i book.odt -c cover.jpg -o book.epub</div>
             <div className="text-slate-400 mt-3">
               <pre className="whitespace-pre-wrap">{`
   ╔══════════════════════════════════════════╗
@@ -69,12 +69,14 @@ function App() {
         {/* Installation */}
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <span className="text-emerald-400">📦</span> Установка
+            <span className="text-yellow-400">📦</span> Установка
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5">
             <div className="font-mono text-sm">
-              <div className="text-slate-400"># Установить зависимости</div>
-              <div className="text-emerald-300 mt-1">npm install jszip commander @xmldom/xmldom</div>
+              <div className="text-slate-400"># Скрипт использует только стандартные библиотеки Python!</div>
+              <div className="text-slate-400"># Никаких зависимостей не требуется.</div>
+              <div className="text-yellow-300 mt-3"># Просто скачайте convert.py и запустите:</div>
+              <div className="text-yellow-300 mt-1">python convert.py --help</div>
             </div>
           </div>
         </div>
@@ -82,24 +84,24 @@ function App() {
         {/* Usage */}
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <span className="text-emerald-400">🚀</span> Использование
+            <span className="text-yellow-400">🚀</span> Использование
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm space-y-3">
             <div>
               <div className="text-slate-400"># Базовая конвертация</div>
-              <div className="text-emerald-300">node convert.js -i document.odt</div>
+              <div className="text-yellow-300">python convert.py -i document.odt</div>
             </div>
             <div>
               <div className="text-slate-400"># С обложкой</div>
-              <div className="text-emerald-300">node convert.js -i document.odt -c cover.jpg</div>
+              <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg</div>
             </div>
             <div>
               <div className="text-slate-400"># Полные параметры</div>
-              <div className="text-emerald-300">node convert.js -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
+              <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
             </div>
             <div>
               <div className="text-slate-400"># Показать справку</div>
-              <div className="text-emerald-300">node convert.js --help</div>
+              <div className="text-yellow-300">python convert.py --help</div>
             </div>
           </div>
         </div>
@@ -107,7 +109,7 @@ function App() {
         {/* Options Table */}
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <span className="text-emerald-400">⚙️</span> Параметры
+            <span className="text-yellow-400">⚙️</span> Параметры
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
             <table className="w-full text-sm">
@@ -120,32 +122,32 @@ function App() {
               </thead>
               <tbody className="divide-y divide-slate-700/50">
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-i, --input</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-i, --input</td>
                   <td className="px-5 py-3 text-slate-300">Путь к входному ODT файлу</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-red-500/20 text-red-300 rounded text-xs">Да</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-c, --cover</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-c, --cover</td>
                   <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-o, --output</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-o, --output</td>
                   <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (по умолчанию: имя ODT + .epub)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-t, --title</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-t, --title</td>
                   <td className="px-5 py-3 text-slate-300">Название книги (по умолчанию из метаданных ODT)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-a, --author</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-a, --author</td>
                   <td className="px-5 py-3 text-slate-300">Автор книги (по умолчанию из метаданных ODT)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-emerald-400">-l, --lang</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">-l, --lang</td>
                   <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: ru)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
@@ -157,7 +159,7 @@ function App() {
         {/* Features */}
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <span className="text-emerald-400">✨</span> Возможности
+            <span className="text-yellow-400">✨</span> Возможности
           </h2>
           <div className="grid md:grid-cols-2 gap-4">
             {[
@@ -181,10 +183,33 @@ function App() {
           </div>
         </div>
 
+        {/* Requirements */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-yellow-400">🐍</span> Требования
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5">
+            <ul className="space-y-2 text-slate-300">
+              <li className="flex items-center gap-2">
+                <span className="text-green-400">✓</span>
+                <span>Python 3.6+</span>
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="text-green-400">✓</span>
+                <span>Стандартные библиотеки (zipfile, xml.etree.ElementTree, argparse)</span>
+              </li>
+              <li className="flex items-center gap-2">
+                <span className="text-green-400">✓</span>
+                <span>Без внешних зависимостей!</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
         {/* EPUB Structure */}
         <div className="mb-8">
           <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-            <span className="text-emerald-400">📁</span> Структура EPUB
+            <span className="text-yellow-400">📁</span> Структура EPUB
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm">
             <pre className="text-slate-300">{`book.epub (ZIP-архив)
@@ -203,10 +228,46 @@ function App() {
           </div>
         </div>
 
+        {/* Code Example */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-yellow-400">💻</span> Пример кода
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm overflow-x-auto">
+            <pre className="text-slate-300">{`# Импорт и использование в вашем коде
+import convert
+
+# Парсинг ODT
+odt_content = convert.parse_odt('document.odt')
+
+# Анализ стилей
+styles_map = convert.parse_styles(odt_content.styles_xml)
+auto_styles_map = convert.parse_content_styles(odt_content.content_xml)
+
+# Конвертация в XHTML
+converter = convert.XHTMLConverter(styles_map, auto_styles_map, odt_content.images)
+xhtml, css, image_files = converter.convert(odt_content.content_xml)
+
+# Генерация EPUB
+epub_buffer = convert.generate_epub(xhtml, css, image_files, {
+    'title': 'Моя книга',
+    'author': 'Автор',
+    'date': '2024-01-01',
+    'language': 'ru',
+    'cover_image': cover_bytes,
+    'cover_mime_type': 'image/jpeg',
+})
+
+# Сохранение
+with open('output.epub', 'wb') as f:
+    f.write(epub_buffer)`}</pre>
+          </div>
+        </div>
+
         {/* Footer */}
         <div className="text-center text-slate-500 text-sm pt-8 border-t border-slate-800">
-          <p>ODT → EPUB Converter CLI • Node.js</p>
-          <p className="mt-1">Файл: <code className="text-emerald-400/70 bg-slate-800 px-2 py-0.5 rounded">convert.js</code></p>
+          <p>ODT → EPUB Converter CLI • Python</p>
+          <p className="mt-1">Файл: <code className="text-yellow-400/70 bg-slate-800 px-2 py-0.5 rounded">convert.py</code></p>
         </div>
       </div>
     </div>
