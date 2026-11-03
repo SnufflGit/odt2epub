@@ -51,14 +51,14 @@ function App() {
   ✅ EPUB собран (245.3 КБ)
 
   [5/5] Сохранение файла...
-  ✅ Файл сохранён: /home/user/book.epub
+  ✅ Файл сохранён: /home/user/book_(14:30_25.12.2024).epub
 
   ┌──────────────────────────────────────────┐
   │  📖 Моя книга
   │  ✍️  Иван Иванов
   │  🌐 RU
   │  📦 245.3 КБ
-  │  📁 book.epub
+  │  📁 book_(14:30_25.12.2024).epub
   └──────────────────────────────────────────┘
 
   ✅ Конвертация завершена!`}</pre>
@@ -133,7 +133,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-o, --output</td>
-                  <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (по умолчанию: имя ODT + .epub)</td>
+                  <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">

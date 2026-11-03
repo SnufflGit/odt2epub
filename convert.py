@@ -720,7 +720,7 @@ def main():
     
     parser.add_argument('-i', '--input', required=True, help='Путь к входному ODT файлу')
     parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT, с расширением .jpg или .png')
-    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (по умолчанию: имя ODT + .epub)')
+    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
@@ -776,7 +776,17 @@ def main():
             log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
     
     # Определяем выходной путь
-    output_path = os.path.abspath(args.output) if args.output else input_path.replace('.odt', '.epub').replace('.ODT', '.epub')
+    if args.output:
+        output_path = os.path.abspath(args.output)
+    else:
+        output_path = os.path.abspath(input_path.replace('.odt', '.epub').replace('.ODT', '.epub'))
+    
+    # Добавляем суффикс с датой и временем создания перед расширением
+    timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
+    output_stem = Path(output_path).stem
+    output_ext = Path(output_path).suffix
+    output_dir = Path(output_path).parent
+    output_path = str(output_dir / f'{output_stem}_({timestamp}){output_ext}')
     
     # Шаг 1: Читаем ODT
     log_step('1/5', 'Чтение ODT файла...')
