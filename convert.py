@@ -128,8 +128,9 @@ def parse_odt(file_path):
     """Разобрать ODT файл"""
     content = ODTContent()
     
+    # Открываем ZIP с явным указанием кодировки для поддержки кириллицы
     with zipfile.ZipFile(file_path, 'r') as zf:
-        # Читаем XML файлы
+        # Читаем XML файлы с явной декодировкой UTF-8
         if 'content.xml' in zf.namelist():
             content.content_xml = zf.read('content.xml').decode('utf-8')
         
@@ -139,7 +140,7 @@ def parse_odt(file_path):
         if 'meta.xml' in zf.namelist():
             content.meta_xml = zf.read('meta.xml').decode('utf-8')
         
-        # Читаем изображения
+        # Читаем изображения (могут иметь кириллические имена)
         for name in zf.namelist():
             if name.startswith('Pictures/') and not name.endswith('/'):
                 content.images[name] = zf.read(name)
@@ -589,16 +590,17 @@ def generate_epub(xhtml, css, image_files, options):
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>'''
-        zf.writestr('META-INF/container.xml', container_xml)
+        # Явно кодируем в UTF-8 для поддержки кириллицы
+        zf.writestr('META-INF/container.xml', container_xml.encode('utf-8'))
         
         manifest_items = []
         spine_items = []
         
-        # CSS
-        zf.writestr('OEBPS/style.css', css)
+        # CSS (явно кодируем в UTF-8)
+        zf.writestr('OEBPS/style.css', css.encode('utf-8'))
         manifest_items.append('    <item id="style" href="style.css" media-type="text/css"/>')
         
-        # Изображения из ODT
+        # Изображения из ODT (могут иметь кириллические имена)
         image_id = 0
         for path, data in image_files.items():
             file_name = path.replace('OEBPS/', '')
@@ -607,6 +609,7 @@ def generate_epub(xhtml, css, image_files, options):
             item_id = f'img_{image_id}'
             image_id += 1
             
+            # Путь может содержать кириллицу - zipfile автоматически использует UTF-8
             zf.writestr(path, data)
             manifest_items.append(f'    <item id="{item_id}" href="{file_name}" media-type="{media_type}"/>')
         
@@ -621,7 +624,7 @@ def generate_epub(xhtml, css, image_files, options):
             manifest_items.append(f'    <item id="cover-image" href="images/{cover_file_name}" media-type="{cover_media_type}" properties="cover-image"/>')
             has_cover = True
         
-        # Страница обложки
+        # Страница обложки (явно кодируем в UTF-8 для поддержки кириллицы)
         if has_cover:
             cover_page = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -635,11 +638,11 @@ def generate_epub(xhtml, css, image_files, options):
   <div id="cover"><img src="images/cover.{cover_ext}" alt="Cover"/></div>
 </body>
 </html>'''
-            zf.writestr('OEBPS/cover.xhtml', cover_page)
+            zf.writestr('OEBPS/cover.xhtml', cover_page.encode('utf-8'))
             manifest_items.append('    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>')
             spine_items.append('    <itemref idref="cover"/>')
         
-        # Основной контент
+        # Основной контент (явно кодируем в UTF-8)
         content_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{options['language']}">
@@ -655,11 +658,11 @@ def generate_epub(xhtml, css, image_files, options):
 </body>
 </html>'''
         
-        zf.writestr('OEBPS/chapter1.xhtml', content_xhtml)
+        zf.writestr('OEBPS/chapter1.xhtml', content_xhtml.encode('utf-8'))
         manifest_items.append('    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>')
         spine_items.append('    <itemref idref="chapter1"/>')
         
-        # NCX (таблица содержимого)
+        # NCX (таблица содержимого, явно кодируем в UTF-8)
         ncx = f'''<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
@@ -677,10 +680,10 @@ def generate_epub(xhtml, css, image_files, options):
   </navMap>
 </ncx>'''
         
-        zf.writestr('OEBPS/toc.ncx', ncx)
+        zf.writestr('OEBPS/toc.ncx', ncx.encode('utf-8'))
         manifest_items.append('    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>')
         
-        # content.opf (манифест)
+        # content.opf (манифест, явно кодируем в UTF-8)
         content_opf = f'''<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
@@ -699,7 +702,7 @@ def generate_epub(xhtml, css, image_files, options):
   </spine>
 </package>'''
         
-        zf.writestr('OEBPS/content.opf', content_opf)
+        zf.writestr('OEBPS/content.opf', content_opf.encode('utf-8'))
     
     return bytes(epub_buffer)
 
@@ -797,37 +800,45 @@ def main():
             log_error(f'Файл должен иметь расширение .odt: {input_path}')
             return False
         
-        # Проверяем обложку
-        cover_buffer = None
-        cover_mime_type = None
+    # Проверяем обложку
+    cover_buffer = None
+    cover_mime_type = None
+    
+    if explicit_cover:
+        cover_path = os.path.abspath(explicit_cover)
+        if not os.path.exists(cover_path):
+            log_error(f'Файл обложки не найден: {cover_path}')
+            return False
         
-        if explicit_cover:
-            cover_path = os.path.abspath(explicit_cover)
-            if not os.path.exists(cover_path):
-                log_error(f'Файл обложки не найден: {cover_path}')
-                return False
-            
+        try:
             with open(cover_path, 'rb') as f:
                 cover_buffer = f.read()
-            
-            ext = Path(cover_path).suffix.lower()
-            cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
-            log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
-        else:
-            # Автопоиск обложки
-            odt_stem = Path(input_path).stem
-            odt_dir = Path(input_path).parent
-            
-            for ext in ('.jpg', '.jpeg', '.png'):
-                candidate = odt_dir / f'{odt_stem}{ext}'
-                if candidate.exists():
+        except Exception as e:
+            log_error(f'Ошибка чтения файла обложки: {e}')
+            return False
+        
+        ext = Path(cover_path).suffix.lower()
+        cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+        log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
+    else:
+        # Автопоиск обложки
+        odt_stem = Path(input_path).stem
+        odt_dir = Path(input_path).parent
+        
+        for ext in ('.jpg', '.jpeg', '.png'):
+            candidate = odt_dir / f'{odt_stem}{ext}'
+            if candidate.exists():
+                try:
                     with open(str(candidate), 'rb') as f:
                         cover_buffer = f.read()
                     cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
                     log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
                     break
-            else:
-                log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
+                except Exception as e:
+                    log_error(f'Ошибка чтения найденной обложки {candidate.name}: {e}')
+                    cover_buffer = None
+        else:
+            log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
         
         # Определяем выходной путь
         if explicit_output:
@@ -844,9 +855,13 @@ def main():
         
         # Шаг 1: Читаем ODT
         log_step('1/5', 'Чтение ODT файла...')
-        odt_content = parse_odt(input_path)
-        image_count = len(odt_content.images)
-        log_ok(f'ODT прочитан (изображений в документе: {image_count})')
+        try:
+            odt_content = parse_odt(input_path)
+            image_count = len(odt_content.images)
+            log_ok(f'ODT прочитан (изображений в документе: {image_count})')
+        except Exception as e:
+            log_error(f'Ошибка чтения ODT файла: {e}')
+            return False
         
         # Шаг 2: Анализируем стили
         log_step('2/5', 'Анализ стилей...')
@@ -881,9 +896,13 @@ def main():
         
         # Шаг 5: Сохраняем файл
         log_step('5/5', 'Сохранение файла...')
-        with open(output_path, 'wb') as f:
-            f.write(epub_buffer)
-        log_ok(f'Файл сохранён: {output_path}')
+        try:
+            with open(output_path, 'wb') as f:
+                f.write(epub_buffer)
+            log_ok(f'Файл сохранён: {output_path}')
+        except Exception as e:
+            log_error(f'Ошибка записи файла: {e}')
+            return False
         
         # Итог
         print('\n  ┌──────────────────────────────────────────┐')

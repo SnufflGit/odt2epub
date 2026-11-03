@@ -15,7 +15,7 @@ function App() {
             Python CLI для конвертации ODT → EPUB
           </p>
           <p className="text-sm text-slate-500 mt-2">
-            Сохранение форматирования • Обложка JPEG/PNG • Встроенные изображения
+            Сохранение форматирования • Обложка JPEG/PNG • Кириллица • Встроенные изображения
           </p>
         </div>
 
@@ -116,6 +116,10 @@ function App() {
               <div className="text-yellow-300">python convert.py -d /path/to/books --no-recursive</div>
             </div>
             <div>
+              <div className="text-slate-400"># С кириллическими именами файлов</div>
+              <div className="text-yellow-300">python convert.py -i "Моя книга.odt" -c "Обложка.jpg"</div>
+            </div>
+            <div>
               <div className="text-slate-400"># Показать справку</div>
               <div className="text-yellow-300">python convert.py --help</div>
             </div>
@@ -207,6 +211,7 @@ function App() {
               { icon: '🔗', title: 'Ссылки', desc: 'Гиперссылки сохраняются' },
               { icon: '📐', title: 'Стили', desc: 'CSS-стили генерируются из ODT-стилей' },
               { icon: '📚', title: 'Метаданные', desc: 'Автор, название, язык, дата из ODT или CLI' },
+              { icon: '🔤', title: 'Кириллица', desc: 'Полная поддержка кириллических названий файлов и содержимого' },
             ].map((item, i) => (
               <div key={i} className="bg-slate-800/30 border border-slate-700/50 rounded-xl p-4 flex gap-3">
                 <span className="text-2xl">{item.icon}</span>
