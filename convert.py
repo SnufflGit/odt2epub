@@ -92,6 +92,28 @@ def escape_xml(text):
             .replace("'", '&apos;'))
 
 
+def get_image_mime_type(ext):
+    """Определить MIME-тип изображения по расширению"""
+    ext = ext.lower().lstrip('.')
+    mime_types = {
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'png': 'image/png',
+        'gif': 'image/gif',
+        'svg': 'image/svg+xml',
+        'webp': 'image/webp',
+        'bmp': 'image/bmp',
+        'tiff': 'image/tiff',
+        'tif': 'image/tiff',
+        'ico': 'image/x-icon',
+    }
+    return mime_types.get(ext, 'image/jpeg')
+
+
+# Поддерживаемые расширения изображений для обложек
+SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif')
+
+
 def get_attr(elem, *names):
     """Получить атрибут элемента с учётом namespace"""
     for name in names:
@@ -609,7 +631,7 @@ def generate_epub(xhtml, css, image_files, options):
         for path, data in image_files.items():
             file_name = path.replace('OEBPS/', '')
             ext = Path(file_name).suffix.lower().lstrip('.')
-            media_type = 'image/png' if ext == 'png' else 'image/jpeg'
+            media_type = get_image_mime_type(ext)
             item_id = f'img_{image_id}'
             image_id += 1
             
@@ -620,8 +642,23 @@ def generate_epub(xhtml, css, image_files, options):
         # Обложка
         has_cover = False
         if options.get('cover_image'):
-            cover_ext = 'png' if options.get('cover_mime_type', '').endswith('png') else 'jpg'
-            cover_media_type = 'image/png' if cover_ext == 'png' else 'image/jpeg'
+            # Определяем расширение из MIME-типа
+            cover_mime = options.get('cover_mime_type', 'image/jpeg')
+            if cover_mime == 'image/png':
+                cover_ext = 'png'
+            elif cover_mime == 'image/gif':
+                cover_ext = 'gif'
+            elif cover_mime == 'image/webp':
+                cover_ext = 'webp'
+            elif cover_mime == 'image/svg+xml':
+                cover_ext = 'svg'
+            elif cover_mime == 'image/bmp':
+                cover_ext = 'bmp'
+            elif cover_mime == 'image/tiff':
+                cover_ext = 'tiff'
+            else:
+                cover_ext = 'jpg'
+            cover_media_type = cover_mime
             cover_file_name = f'cover.{cover_ext}'
             
             zf.writestr(f'OEBPS/images/{cover_file_name}', options['cover_image'])
@@ -732,11 +769,11 @@ def main():
     )
     
     parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
-    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT, с расширением .jpg или .png')
+    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF). Если не указан, ищется файл с тем же именем, что и ODT')
     parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (только для одного файла, по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
-    parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
+    parser.add_argument('-l', '--lang', default='ru', help='Язык книги (ISO 639-1, по умолчанию: ru)')
     parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
@@ -812,20 +849,20 @@ def main():
                 return False
             
             ext = Path(cover_path).suffix.lower()
-            cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+            cover_mime_type = get_image_mime_type(ext)
             log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
         else:
             # Автопоиск обложки
             odt_stem = Path(input_path).stem
             odt_dir = Path(input_path).parent
             
-            for ext in ('.jpg', '.jpeg', '.png'):
+            for ext in SUPPORTED_IMAGE_EXTENSIONS:
                 candidate = odt_dir / f'{odt_stem}{ext}'
                 if candidate.exists():
                     try:
                         with open(str(candidate), 'rb') as f:
                             cover_buffer = f.read()
-                        cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+                        cover_mime_type = get_image_mime_type(ext)
                         log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
                         break
                     except Exception as e:

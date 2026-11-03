@@ -15,7 +15,7 @@ function App() {
             Python CLI для конвертации ODT → EPUB
           </p>
           <p className="text-sm text-slate-500 mt-2">
-            Сохранение форматирования • Обложка JPEG/PNG • Кириллица • Встроенные изображения
+            Сохранение форматирования • Обложка (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF) • Кириллица • Встроенные изображения
           </p>
         </div>
 
@@ -164,7 +164,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-c, --cover</td>
-                  <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF). Если не указан, ищется файл с тем же именем, что и ODT</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
@@ -184,7 +184,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-l, --lang</td>
-                  <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: пусто)</td>
+                  <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: ru)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
@@ -218,7 +218,7 @@ function App() {
               { icon: '📊', title: 'Таблицы', desc: 'Полная поддержка таблиц с объединением ячеек' },
               { icon: '📋', title: 'Списки', desc: 'Маркированные и нумерованные списки' },
               { icon: '🖼️', title: 'Изображения', desc: 'Встроенные изображения из ODT переносятся в EPUB' },
-              { icon: '🎨', title: 'Обложка', desc: 'JPEG/PNG обложка с отдельной страницей' },
+              { icon: '🎨', title: 'Обложка', desc: 'JPEG/PNG/GIF/WebP/SVG/BMP/TIFF обложка с отдельной страницей' },
               { icon: '🔗', title: 'Ссылки', desc: 'Гиперссылки сохраняются' },
               { icon: '📐', title: 'Стили', desc: 'CSS-стили генерируются из ODT-стилей' },
               { icon: '📚', title: 'Метаданные', desc: 'Автор, название, язык, дата из ODT или CLI' },
@@ -232,6 +232,61 @@ function App() {
                 </div>
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Supported Image Formats */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
+            <span className="text-yellow-400">🖼️</span> Поддерживаемые форматы изображений
+          </h2>
+          <div className="bg-slate-800/50 border border-slate-700 rounded-xl overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700 bg-slate-800">
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">Формат</th>
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">Расширения</th>
+                  <th className="text-left px-5 py-3 text-slate-300 font-medium">MIME-тип</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">JPEG</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.jpg, .jpeg</td>
+                  <td className="px-5 py-3 text-slate-400">image/jpeg</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">PNG</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.png</td>
+                  <td className="px-5 py-3 text-slate-400">image/png</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">GIF</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.gif</td>
+                  <td className="px-5 py-3 text-slate-400">image/gif</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">WebP</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.webp</td>
+                  <td className="px-5 py-3 text-slate-400">image/webp</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">SVG</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.svg</td>
+                  <td className="px-5 py-3 text-slate-400">image/svg+xml</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">BMP</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.bmp</td>
+                  <td className="px-5 py-3 text-slate-400">image/bmp</td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 text-slate-300">TIFF</td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">.tiff, .tif</td>
+                  <td className="px-5 py-3 text-slate-400">image/tiff</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
