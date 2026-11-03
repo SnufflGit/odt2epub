@@ -28,6 +28,7 @@ import sys
 import zipfile
 import uuid
 import re
+import io
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from pathlib import Path
@@ -603,7 +604,7 @@ def generate_epub(xhtml, css, image_files, options):
     book_uuid = str(uuid.uuid4())
     
     # Создаём ZIP
-    epub_buffer = bytearray()
+    epub_buffer = io.BytesIO()
     
     with zipfile.ZipFile(epub_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         # mimetype (должен быть первым, без сжатия)
@@ -745,7 +746,7 @@ def generate_epub(xhtml, css, image_files, options):
         
         zf.writestr('OEBPS/content.opf', content_opf.encode('utf-8'))
     
-    return bytes(epub_buffer)
+    return epub_buffer.getvalue()
 
 
 # ============================================================
