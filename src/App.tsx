@@ -100,7 +100,7 @@ function App() {
               <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
             </div>
             <div>
-              <div className="text-slate-400"># Пакетная конвертация директории</div>
+              <div className="text-slate-400"># Пакетная конвертация директории (рекурсивно)</div>
               <div className="text-yellow-300">python convert.py -d /path/to/books</div>
             </div>
             <div>
@@ -110,6 +110,10 @@ function App() {
             <div>
               <div className="text-slate-400"># С файлом исключений</div>
               <div className="text-yellow-300">python convert.py -d /path/to/books --exclude-file exclude.txt</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Без рекурсивного поиска (только текущая директория)</div>
+              <div className="text-yellow-300">python convert.py -d /path/to/books --no-recursive</div>
             </div>
             <div>
               <div className="text-slate-400"># Показать справку</div>
@@ -165,7 +169,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-d, --directory</td>
-                  <td className="px-5 py-3 text-slate-300">Путь к директории для пакетной обработки всех ODT файлов (рекурсивно)</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к директории для пакетной обработки всех ODT файлов (рекурсивно по умолчанию)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
@@ -176,6 +180,11 @@ function App() {
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">--exclude-file</td>
                   <td className="px-5 py-3 text-slate-300">Файл со списком исключений (по одному на строку, # для комментариев)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-yellow-400">--no-recursive</td>
+                  <td className="px-5 py-3 text-slate-300">Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
               </tbody>

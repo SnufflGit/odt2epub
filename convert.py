@@ -732,6 +732,7 @@ def main():
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
     parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
+    parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     
     args = parser.parse_args()
     
@@ -899,7 +900,7 @@ def main():
     
     # Пакетная обработка директории
     def process_directory(directory_path):
-        """Обрабатывает все ODT файлы в директории (рекурсивно)"""
+        """Обрабатывает все ODT файлы в директории (рекурсивно или нет)"""
         directory_path = os.path.abspath(directory_path)
         
         if not os.path.exists(directory_path):
@@ -912,15 +913,25 @@ def main():
         
         # Собираем все ODT файлы
         all_odt_files = []
-        for root, dirs, files in os.walk(directory_path):
-            # Фильтруем директории по исключениям
-            dirs[:] = [d for d in dirs if not should_exclude(Path(root) / d)]
-            
-            for file_name in files:
-                if file_name.lower().endswith('.odt'):
-                    file_path = Path(root) / file_name
+        
+        if args.no_recursive:
+            # Нерекурсивный режим: только файлы в указанной директории
+            for file_name in os.listdir(directory_path):
+                file_path = Path(directory_path) / file_name
+                if file_path.is_file() and file_name.lower().endswith('.odt'):
                     if not should_exclude(file_path):
                         all_odt_files.append(file_path)
+        else:
+            # Рекурсивный режим: обход всех поддиректорий
+            for root, dirs, files in os.walk(directory_path):
+                # Фильтруем директории по исключениям
+                dirs[:] = [d for d in dirs if not should_exclude(Path(root) / d)]
+                
+                for file_name in files:
+                    if file_name.lower().endswith('.odt'):
+                        file_path = Path(root) / file_name
+                        if not should_exclude(file_path):
+                            all_odt_files.append(file_path)
         
         if not all_odt_files:
             log('ℹ️  ODT файлы не найдены в указанной директории')
