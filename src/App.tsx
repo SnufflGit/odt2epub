@@ -100,6 +100,18 @@ function App() {
               <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
             </div>
             <div>
+              <div className="text-slate-400"># Пакетная конвертация директории</div>
+              <div className="text-yellow-300">python convert.py -d /path/to/books</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Пакетная конвертация с исключениями</div>
+              <div className="text-yellow-300">python convert.py -d /path/to/books -e "temp/*" -e "*.draft.odt"</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># С файлом исключений</div>
+              <div className="text-yellow-300">python convert.py -d /path/to/books --exclude-file exclude.txt</div>
+            </div>
+            <div>
               <div className="text-slate-400"># Показать справку</div>
               <div className="text-yellow-300">python convert.py --help</div>
             </div>
@@ -149,6 +161,21 @@ function App() {
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-l, --lang</td>
                   <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: пусто)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-yellow-400">-d, --directory</td>
+                  <td className="px-5 py-3 text-slate-300">Путь к директории для пакетной обработки всех ODT файлов (рекурсивно)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-yellow-400">-e, --exclude</td>
+                  <td className="px-5 py-3 text-slate-300">Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
+                </tr>
+                <tr className="hover:bg-slate-700/20">
+                  <td className="px-5 py-3 font-mono text-yellow-400">--exclude-file</td>
+                  <td className="px-5 py-3 text-slate-300">Файл со списком исключений (по одному на строку, # для комментариев)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
               </tbody>
