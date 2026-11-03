@@ -721,7 +721,7 @@ def main():
     parser.add_argument('-i', '--input', required=True, help='Путь к входному ODT файлу')
     parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT, с расширением .jpg или .png')
     parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (по умолчанию: имя ODT + .epub)')
-    parser.add_argument('-t', '--title', help='Название книги (по умолчанию из метаданных ODT)')
+    parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
     
@@ -792,7 +792,7 @@ def main():
     
     # Извлекаем метаданные
     meta = extract_meta(odt_content.meta_xml)
-    title = args.title or meta['title'] or 'Untitled'
+    title = args.title or Path(input_path).stem
     author = args.author or meta['author'] or 'Unknown'
     log_ok(f'Метаданные: "{title}" — {author}')
     

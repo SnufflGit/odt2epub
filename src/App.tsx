@@ -138,7 +138,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-t, --title</td>
-                  <td className="px-5 py-3 text-slate-300">Название книги (по умолчанию из метаданных ODT)</td>
+                  <td className="px-5 py-3 text-slate-300">Название книги (по умолчанию: имя файла ODT без расширения)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
