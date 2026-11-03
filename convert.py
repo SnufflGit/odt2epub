@@ -8,11 +8,18 @@ ODT → EPUB Converter
 Поддерживает JPEG/PNG обложку.
 
 Использование:
-    python convert.py -i document.odt -o output.epub [-c cover.jpg] [-t "Название"] [-a "Автор"] [-l ru]
-    python convert.py -d /path/to/books [-e "temp/*"] [-e "*.draft.odt"] [--exclude-file exclude.txt]
+    python convert.py [пути...] [опции]
+    
+    Если пути не указаны, обрабатывается текущая директория.
+    Если путь указывает на файл — конвертируется только этот файл.
+    Если путь указывает на директорию — конвертируются все ODT файлы в ней.
 
-Зависимости:
-    Только стандартные библиотеки Python 3.6+
+Примеры:
+    python convert.py
+    python convert.py document.odt
+    python convert.py /path/to/books
+    python convert.py file1.odt file2.odt /path/to/books
+    python convert.py -d /path/to/books -e "temp/*" --exclude-file exclude.txt
 """
 
 import argparse
@@ -286,7 +293,6 @@ def extract_meta(meta_xml):
     meta = {
         'title': 'Untitled',
         'author': 'Unknown',
-        'date': datetime.now().isoformat()
     }
     
     if not meta_xml:
@@ -304,8 +310,6 @@ def extract_meta(meta_xml):
             meta['title'] = elem.text
         elif tag in ('creator', 'initial-creator') and elem.text:
             meta['author'] = elem.text
-        elif tag == 'date' and elem.text:
-            meta['date'] = elem.text
     
     return meta
 
@@ -717,19 +721,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Примеры:
-  python convert.py -i document.odt
-  python convert.py -i document.odt -c cover.jpg
-  python convert.py -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru
-  python convert.py -d /path/to/books
-  python convert.py -d /path/to/books -e "temp/*" -e "*.draft.odt"
-  python convert.py -d /path/to/books --exclude-file exclude.txt
+  python convert.py
+  python convert.py document.odt
+  python convert.py file1.odt file2.odt
+  python convert.py /path/to/books
+  python convert.py file.odt /path/to/books
+  python convert.py -e "temp/*" -e "*.draft.odt"
+  python convert.py --exclude-file exclude.txt
         '''
     )
     
-    parser.add_argument('-i', '--input', help='Путь к входному ODT файлу')
-    parser.add_argument('-d', '--directory', help='Путь к директории для пакетной обработки всех ODT файлов')
+    parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
     parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG). Если не указан, ищется файл с тем же именем, что и ODT, с расширением .jpg или .png')
-    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
+    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (только для одного файла, по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1, по умолчанию: пусто)')
@@ -738,16 +742,6 @@ def main():
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     
     args = parser.parse_args()
-    
-    # Проверка аргументов
-    if not args.input and not args.directory:
-        log_error('Необходимо указать либо -i/--input, либо -d/--directory')
-        parser.print_help()
-        sys.exit(1)
-    
-    if args.input and args.directory:
-        log_error('Нельзя указать одновременно -i/--input и -d/--directory')
-        sys.exit(1)
     
     print('\n  ╔══════════════════════════════════════════╗')
     print('  ║       ODT → EPUB Converter v1.0.0       ║')
@@ -800,45 +794,45 @@ def main():
             log_error(f'Файл должен иметь расширение .odt: {input_path}')
             return False
         
-    # Проверяем обложку
-    cover_buffer = None
-    cover_mime_type = None
-    
-    if explicit_cover:
-        cover_path = os.path.abspath(explicit_cover)
-        if not os.path.exists(cover_path):
-            log_error(f'Файл обложки не найден: {cover_path}')
-            return False
+        # Проверяем обложку
+        cover_buffer = None
+        cover_mime_type = None
         
-        try:
-            with open(cover_path, 'rb') as f:
-                cover_buffer = f.read()
-        except Exception as e:
-            log_error(f'Ошибка чтения файла обложки: {e}')
-            return False
-        
-        ext = Path(cover_path).suffix.lower()
-        cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
-        log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
-    else:
-        # Автопоиск обложки
-        odt_stem = Path(input_path).stem
-        odt_dir = Path(input_path).parent
-        
-        for ext in ('.jpg', '.jpeg', '.png'):
-            candidate = odt_dir / f'{odt_stem}{ext}'
-            if candidate.exists():
-                try:
-                    with open(str(candidate), 'rb') as f:
-                        cover_buffer = f.read()
-                    cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
-                    log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
-                    break
-                except Exception as e:
-                    log_error(f'Ошибка чтения найденной обложки {candidate.name}: {e}')
-                    cover_buffer = None
+        if explicit_cover:
+            cover_path = os.path.abspath(explicit_cover)
+            if not os.path.exists(cover_path):
+                log_error(f'Файл обложки не найден: {cover_path}')
+                return False
+            
+            try:
+                with open(cover_path, 'rb') as f:
+                    cover_buffer = f.read()
+            except Exception as e:
+                log_error(f'Ошибка чтения файла обложки: {e}')
+                return False
+            
+            ext = Path(cover_path).suffix.lower()
+            cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+            log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
         else:
-            log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
+            # Автопоиск обложки
+            odt_stem = Path(input_path).stem
+            odt_dir = Path(input_path).parent
+            
+            for ext in ('.jpg', '.jpeg', '.png'):
+                candidate = odt_dir / f'{odt_stem}{ext}'
+                if candidate.exists():
+                    try:
+                        with open(str(candidate), 'rb') as f:
+                            cover_buffer = f.read()
+                        cover_mime_type = 'image/png' if ext == '.png' else 'image/jpeg'
+                        log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
+                        break
+                    except Exception as e:
+                        log_error(f'Ошибка чтения найденной обложки {candidate.name}: {e}')
+                        cover_buffer = None
+            else:
+                log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
         
         # Определяем выходной путь
         if explicit_output:
@@ -883,10 +877,12 @@ def main():
         
         # Шаг 4: Генерируем EPUB
         log_step('4/5', 'Сборка EPUB...')
+        # Используем дату генерации
+        generation_date = datetime.now().isoformat(timespec='seconds')
         epub_buffer = generate_epub(xhtml, css, image_files, {
             'title': title,
             'author': author,
-            'date': meta['date'],
+            'date': generation_date,
             'language': explicit_lang or 'und',
             'cover_image': cover_buffer,
             'cover_mime_type': cover_mime_type,
@@ -917,18 +913,18 @@ def main():
         log_ok('Конвертация завершена!\n')
         return True
     
-    # Пакетная обработка директории
+    # Обработка директории
     def process_directory(directory_path):
-        """Обрабатывает все ODT файлы в директории (рекурсивно или нет)"""
+        """Обрабатывает все ODT файлы в директории"""
         directory_path = os.path.abspath(directory_path)
         
         if not os.path.exists(directory_path):
             log_error(f'Директория не найдена: {directory_path}')
-            return
+            return []
         
         if not os.path.isdir(directory_path):
             log_error(f'Указанный путь не является директорией: {directory_path}')
-            return
+            return []
         
         # Собираем все ODT файлы
         all_odt_files = []
@@ -952,32 +948,69 @@ def main():
                         if not should_exclude(file_path):
                             all_odt_files.append(file_path)
         
-        if not all_odt_files:
-            log('ℹ️  ODT файлы не найдены в указанной директории')
-            return
+        return all_odt_files
+    
+    # Определяем пути для обработки
+    paths_to_process = args.paths if args.paths else ['.']
+    
+    # Собираем все файлы для обработки
+    all_files = []
+    
+    for path in paths_to_process:
+        path = os.path.abspath(path)
         
-        # Показываем список исключений
-        if exclude_patterns:
-            log(f'🚫 Исключения ({len(exclude_patterns)}):')
-            for pattern in exclude_patterns:
-                log(f'   • {pattern}')
-            print()
+        if not os.path.exists(path):
+            log_error(f'Путь не найден: {path}')
+            continue
         
-        log(f'📂 Найдено ODT файлов: {len(all_odt_files)}')
+        if os.path.isfile(path):
+            # Это файл
+            if path.lower().endswith('.odt'):
+                if not should_exclude(Path(path)):
+                    all_files.append(path)
+            else:
+                log_error(f'Файл не является ODT: {path}')
+        elif os.path.isdir(path):
+            # Это директория
+            files = process_directory(path)
+            all_files.extend(files)
+    
+    if not all_files:
+        log('ℹ️  ODT файлы не найдены')
+        sys.exit(0)
+    
+    # Показываем список исключений
+    if exclude_patterns:
+        log(f'🚫 Исключения ({len(exclude_patterns)}):')
+        for pattern in exclude_patterns:
+            log(f'   • {pattern}')
         print()
-        
+    
+    log(f'📂 Найдено ODT файлов: {len(all_files)}')
+    
+    # Если только один файл и указан -o, используем его
+    if len(all_files) == 1 and args.output:
+        process_single_file(
+            all_files[0],
+            explicit_cover=args.cover,
+            explicit_output=args.output,
+            explicit_title=args.title,
+            explicit_author=args.author,
+            explicit_lang=args.lang
+        )
+    else:
         # Обрабатываем каждый файл
         success_count = 0
         fail_count = 0
         
-        for i, file_path in enumerate(all_odt_files, 1):
+        for i, file_path in enumerate(all_files, 1):
             print(f'\n  {"─" * 50}')
-            log(f'📄 [{i}/{len(all_odt_files)}] {file_path.name}')
+            log(f'📄 [{i}/{len(all_files)}] {Path(file_path).name}')
             print(f'  {"─" * 50}')
             
             try:
                 if process_single_file(
-                    str(file_path),
+                    file_path,
                     explicit_cover=args.cover,
                     explicit_output=None,  # В пакетном режиме всегда автоимя
                     explicit_title=args.title,
@@ -993,26 +1026,11 @@ def main():
         
         # Итоговая статистика
         print(f'\n  {"═" * 50}')
-        print(f'  📊 Итого: {len(all_odt_files)} файлов')
+        print(f'  📊 Итого: {len(all_files)} файлов')
         print(f'  ✅ Успешно: {success_count}')
         if fail_count > 0:
             print(f'  ❌ Ошибок: {fail_count}')
         print(f'  {"═" * 50}\n')
-    
-    # Основная логика
-    if args.input:
-        # Одиночная обработка файла
-        process_single_file(
-            args.input,
-            explicit_cover=args.cover,
-            explicit_output=args.output,
-            explicit_title=args.title,
-            explicit_author=args.author,
-            explicit_lang=args.lang
-        )
-    elif args.directory:
-        # Пакетная обработка директории
-        process_directory(args.directory)
 
 
 if __name__ == '__main__':

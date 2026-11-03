@@ -69,13 +69,21 @@ python convert.py --help
 
 ## ⚡ Быстрый старт
 
-### Базовая конвертация
+### Обработка текущей директории
 
 ```bash
-python convert.py -i document.odt
+python convert.py
 ```
 
-Результат: `document.epub` в той же папке.
+Конвертирует все ODT файлы в текущей директории и поддиректориях.
+
+### Конвертация одного файла
+
+```bash
+python convert.py document.odt
+```
+
+Результат: `document_(14:30_25.12.2024).epub` в той же папке.
 
 ### С обложкой
 
@@ -83,7 +91,7 @@ python convert.py -i document.odt
 
 ```bash
 # document.odt + document.jpg → document.epub
-python convert.py -i document.odt
+python convert.py document.odt
 ```
 
 Обложка будет найдена автоматически!
@@ -91,13 +99,19 @@ python convert.py -i document.odt
 Или явно указать обложку:
 
 ```bash
-python convert.py -i document.odt -c cover.jpg
+python convert.py document.odt -c cover.jpg
+```
+
+### Несколько файлов и директорий
+
+```bash
+python convert.py file1.odt file2.odt /path/to/books
 ```
 
 ### Полные параметры
 
 ```bash
-python convert.py -i document.odt -c cover.jpg -o output.epub -t "Моя книга" -a "Иван Иванов" -l ru
+python convert.py document.odt -c cover.jpg -o output.epub -t "Моя книга" -a "Иван Иванов" -l ru
 ```
 
 ## 📖 Использование
@@ -105,27 +119,35 @@ python convert.py -i document.odt -c cover.jpg -o output.epub -t "Моя кни�
 ### Синтаксис
 
 ```bash
-# Одиночная конвертация
-python convert.py -i <input.odt> [options]
+# Обработка текущей директории
+python convert.py [options]
 
-# Пакетная конвертация директории
-python convert.py -d <directory> [options]
+# Конвертация одного или нескольких файлов
+python convert.py <file1.odt> [file2.odt ...] [options]
+
+# Обработка директории
+python convert.py <directory> [options]
+
+# Комбинированный режим
+python convert.py <file.odt> <directory> [options]
 ```
 
-### Обязательные параметры (один из)
+### Позиционные параметры
 
-- `-i, --input <path>` - путь к входному ODT файлу
-- `-d, --directory <path>` - путь к директории для пакетной обработки всех ODT файлов (рекурсивно по умолчанию, отключается через `--no-recursive`)
+- `paths` - пути к файлам или директориям (если не указаны, обрабатывается текущая директория)
+  - Если путь указывает на файл — конвертируется только этот файл
+  - Если путь указывает на директорию — конвертируются все ODT файлы в ней
+  - Можно указывать несколько путей одновременно
 
 ### Опциональные параметры
 
 - `-c, --cover <path>` - путь к обложке (JPEG/PNG)
-- `-o, --output <path>` - путь для выходного EPUB файла (только для одиночной конвертации)
+- `-o, --output <path>` - путь для выходного EPUB файла (только для одного файла)
 - `-t, --title <string>` - название книги
 - `-a, --author <string>` - автор книги
 - `-l, --lang <code>` - язык книги (ISO 639-1)
 
-### Параметры исключений (для пакетной обработки)
+### Параметры исключений
 
 - `-e, --exclude <pattern>` - исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)
 - `--exclude-file <path>` - файл со списком исключений (по одному на строку, # для комментариев)
@@ -133,7 +155,11 @@ python convert.py -d <directory> [options]
 
 ### Режимы поиска
 
-По умолчанию при использовании `-d` скрипт рекурсивно обходит все поддиректории. Если нужно обработать только файлы в указанной директории без рекурсии, используйте флаг `--no-recursive`.
+По умолчанию скрипт рекурсивно обходит все поддиректории. Если нужно обработать только файлы в указанной директории без рекурсии, используйте флаг `--no-recursive`.
+
+### Дата в метаданных
+
+Дата в EPUB файле устанавливается как **дата генерации** (текущая дата и время), а не дата из метаданных ODT документа.
 
 ### Значения по умолчанию
 
@@ -147,15 +173,23 @@ python convert.py -d <directory> [options]
 
 ## 📝 Примеры
 
-### Пример 1: Простая конвертация
+### Пример 1: Обработка текущей директории
 
 ```bash
-python convert.py -i book.odt
+python convert.py
+```
+
+Конвертирует все ODT файлы в текущей директории и поддиректориях.
+
+### Пример 2: Конвертация одного файла
+
+```bash
+python convert.py book.odt
 ```
 
 **Результат**: `book_(14:30_25.12.2024).epub`
 
-### Пример 2: С автоматической обложкой
+### Пример 3: С автоматической обложкой
 
 Файлы в папке:
 ```
@@ -164,7 +198,7 @@ book.jpg      ← будет найдена автоматически
 ```
 
 ```bash
-python convert.py -i book.odt
+python convert.py book.odt
 ```
 
 **Вывод**:
@@ -172,29 +206,43 @@ python convert.py -i book.odt
   ✅ Обложка найдена автоматически: book.jpg (image/jpeg)
 ```
 
-### Пример 3: С явной обложкой
+### Пример 4: С явной обложкой
 
 ```bash
-python convert.py -i book.odt -c images/cover.png
+python convert.py book.odt -c images/cover.png
 ```
 
-### Пример 4: Указать название и автора
+### Пример 5: Несколько файлов
 
 ```bash
-python convert.py -i document.odt -t "Война и мир" -a "Лев Толстой"
+python convert.py file1.odt file2.odt file3.odt
 ```
 
-### Пример 5: Указать язык
+### Пример 6: Файлы и директории вместе
 
 ```bash
-python convert.py -i book.odt -l en
+python convert.py document.odt /path/to/books
 ```
 
-### Пример 6: Полный пример
+Конвертирует указанный файл и все ODT файлы в директории.
+
+### Пример 7: Указать название и автора
+
+```bash
+python convert.py document.odt -t "Война и мир" -a "Лев Толстой"
+```
+
+### Пример 8: Указать язык
+
+```bash
+python convert.py book.odt -l en
+```
+
+### Пример 9: Полный пример
 
 ```bash
 python convert.py \
-  -i "Моя книга.odt" \
+  "Моя книга.odt" \
   -c cover.jpg \
   -o "Моя книга.epub" \
   -t "Приключения в стране чудес" \
@@ -202,23 +250,23 @@ python convert.py \
   -l ru
 ```
 
-### Пример 7: Пакетная конвертация директории (рекурсивно)
+### Пример 10: Конвертация директории (рекурсивно)
 
 ```bash
-python convert.py -d /path/to/books
+python convert.py /path/to/books
 ```
 
 Конвертирует все ODT файлы в указанной директории и её поддиректориях (рекурсивно по умолчанию).
 
-### Пример 8: Пакетная конвертация с исключениями
+### Пример 11: Конвертация с исключениями
 
 ```bash
-python convert.py -d /path/to/books -e "temp/*" -e "*.draft.odt"
+python convert.py /path/to/books -e "temp/*" -e "*.draft.odt"
 ```
 
 Исключает все файлы из папки `temp` и все файлы с расширением `.draft.odt`.
 
-### Пример 9: Пакетная конвертация с файлом исключений
+### Пример 12: С файлом исключений
 
 Создайте файл `exclude.txt`:
 
@@ -239,32 +287,24 @@ test.odt
 Затем запустите:
 
 ```bash
-python convert.py -d /path/to/books --exclude-file exclude.txt
+python convert.py /path/to/books --exclude-file exclude.txt
 ```
 
-### Пример 10: Пакетная конвертация без рекурсии
+### Пример 13: Конвертация без рекурсии
 
 ```bash
-python convert.py -d /path/to/books --no-recursive
+python convert.py /path/to/books --no-recursive
 ```
 
 Конвертирует только ODT файлы в указанной директории, без обхода поддиректорий.
 
-### Пример 10: Пакетная конвертация через bash (альтернатива)
+### Пример 14: Несколько директорий
 
 ```bash
-for file in *.odt; do
-  python convert.py -i "$file"
-done
+python convert.py /path/to/books1 /path/to/books2 /path/to/books3
 ```
 
-### Пример 11: Пакетная конвертация через PowerShell (альтернатива)
-
-```powershell
-Get-ChildItem *.odt | ForEach-Object {
-  python convert.py -i $_.FullName
-}
-```
+Конвертирует ODT файлы из всех указанных директорий.
 
 ## 🔤 Поддержка кириллицы
 
@@ -292,16 +332,16 @@ Get-ChildItem *.odt | ForEach-Object {
 
 ```bash
 # Конвертация файла с кириллическим именем
-python convert.py -i "Моя книга.odt"
+python convert.py "Моя книга.odt"
 
 # С кириллической обложкой
-python convert.py -i "Документ.odt" -c "Обложка.jpg"
+python convert.py "Документ.odt" -c "Обложка.jpg"
 
-# Пакетная обработка кириллической директории
-python convert.py -d "Мои книги/Русская классика"
+# Обработка кириллической директории
+python convert.py "Мои книги/Русская классика"
 
 # С кириллическими метаданными
-python convert.py -i "Файл.odt" -t "Название книги" -a "Иван Иванов"
+python convert.py "Файл.odt" -t "Название книги" -a "Иван Иванов"
 ```
 
 ### Примечания

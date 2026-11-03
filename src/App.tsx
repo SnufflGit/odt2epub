@@ -28,7 +28,7 @@ function App() {
             <span className="ml-3 text-sm text-slate-400 font-mono">Terminal</span>
           </div>
           <div className="bg-slate-900 p-6 font-mono text-sm leading-relaxed overflow-x-auto">
-            <div className="text-yellow-400">$ python convert.py -i book.odt -c cover.jpg -o book.epub</div>
+            <div className="text-yellow-400">$ python convert.py book.odt -c cover.jpg -o book.epub</div>
             <div className="text-slate-400 mt-3">
               <pre className="whitespace-pre-wrap">{`
   ╔══════════════════════════════════════════╗
@@ -88,36 +88,52 @@ function App() {
           </h2>
           <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-5 font-mono text-sm space-y-3">
             <div>
-              <div className="text-slate-400"># Базовая конвертация (обложка ищется автоматически)</div>
-              <div className="text-yellow-300">python convert.py -i document.odt</div>
+              <div className="text-slate-400"># Обработка текущей директории</div>
+              <div className="text-yellow-300">python convert.py</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Конвертация одного файла</div>
+              <div className="text-yellow-300">python convert.py document.odt</div>
             </div>
             <div>
               <div className="text-slate-400"># С явной обложкой</div>
-              <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg</div>
+              <div className="text-yellow-300">python convert.py document.odt -c cover.jpg</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Несколько файлов</div>
+              <div className="text-yellow-300">python convert.py file1.odt file2.odt file3.odt</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Файлы и директории вместе</div>
+              <div className="text-yellow-300">python convert.py document.odt /path/to/books</div>
             </div>
             <div>
               <div className="text-slate-400"># Полные параметры</div>
-              <div className="text-yellow-300">python convert.py -i document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
+              <div className="text-yellow-300">python convert.py document.odt -c cover.jpg -o output.epub -t "Название" -a "Автор" -l ru</div>
             </div>
             <div>
-              <div className="text-slate-400"># Пакетная конвертация директории (рекурсивно)</div>
-              <div className="text-yellow-300">python convert.py -d /path/to/books</div>
+              <div className="text-slate-400"># Конвертация директории (рекурсивно)</div>
+              <div className="text-yellow-300">python convert.py /path/to/books</div>
             </div>
             <div>
-              <div className="text-slate-400"># Пакетная конвертация с исключениями</div>
-              <div className="text-yellow-300">python convert.py -d /path/to/books -e "temp/*" -e "*.draft.odt"</div>
+              <div className="text-slate-400"># Конвертация с исключениями</div>
+              <div className="text-yellow-300">python convert.py /path/to/books -e "temp/*" -e "*.draft.odt"</div>
             </div>
             <div>
               <div className="text-slate-400"># С файлом исключений</div>
-              <div className="text-yellow-300">python convert.py -d /path/to/books --exclude-file exclude.txt</div>
+              <div className="text-yellow-300">python convert.py /path/to/books --exclude-file exclude.txt</div>
             </div>
             <div>
-              <div className="text-slate-400"># Без рекурсивного поиска (только текущая директория)</div>
-              <div className="text-yellow-300">python convert.py -d /path/to/books --no-recursive</div>
+              <div className="text-slate-400"># Без рекурсивного поиска</div>
+              <div className="text-yellow-300">python convert.py /path/to/books --no-recursive</div>
+            </div>
+            <div>
+              <div className="text-slate-400"># Несколько директорий</div>
+              <div className="text-yellow-300">python convert.py /path/to/books1 /path/to/books2 /path/to/books3</div>
             </div>
             <div>
               <div className="text-slate-400"># С кириллическими именами файлов</div>
-              <div className="text-yellow-300">python convert.py -i "Моя книга.odt" -c "Обложка.jpg"</div>
+              <div className="text-yellow-300">python convert.py "Моя книга.odt" -c "Обложка.jpg"</div>
             </div>
             <div>
               <div className="text-slate-400"># Показать справку</div>
@@ -142,9 +158,9 @@ function App() {
               </thead>
               <tbody className="divide-y divide-slate-700/50">
                 <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-yellow-400">-i, --input</td>
-                  <td className="px-5 py-3 text-slate-300">Путь к входному ODT файлу</td>
-                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-red-500/20 text-red-300 rounded text-xs">Да</span></td>
+                  <td className="px-5 py-3 font-mono text-yellow-400">paths</td>
+                  <td className="px-5 py-3 text-slate-300">Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)</td>
+                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-c, --cover</td>
@@ -153,7 +169,7 @@ function App() {
                 </tr>
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-o, --output</td>
-                  <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)</td>
+                  <td className="px-5 py-3 text-slate-300">Путь для выходного EPUB (только для одного файла, по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
@@ -169,11 +185,6 @@ function App() {
                 <tr className="hover:bg-slate-700/20">
                   <td className="px-5 py-3 font-mono text-yellow-400">-l, --lang</td>
                   <td className="px-5 py-3 text-slate-300">Язык книги (ISO 639-1, по умолчанию: пусто)</td>
-                  <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
-                </tr>
-                <tr className="hover:bg-slate-700/20">
-                  <td className="px-5 py-3 font-mono text-yellow-400">-d, --directory</td>
-                  <td className="px-5 py-3 text-slate-300">Путь к директории для пакетной обработки всех ODT файлов (рекурсивно по умолчанию)</td>
                   <td className="px-5 py-3"><span className="px-2 py-0.5 bg-slate-600/50 text-slate-400 rounded text-xs">Нет</span></td>
                 </tr>
                 <tr className="hover:bg-slate-700/20">
