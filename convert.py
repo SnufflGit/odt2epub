@@ -806,6 +806,10 @@ def main():
         file_path_str = str(file_path)
         file_name = file_path.name
         
+        # Автоматическое исключение файлов с окончанием "Draft"
+        if file_name.lower().endswith('draft.odt'):
+            return True
+        
         for pattern in exclude_patterns:
             # Проверяем точное совпадение
             if file_path_str == pattern or file_name == pattern:
