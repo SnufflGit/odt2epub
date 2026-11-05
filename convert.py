@@ -781,6 +781,7 @@ def main():
     parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
+    parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
 
     args = parser.parse_args()
 
@@ -823,7 +824,7 @@ def main():
         return False
 
     # Обработка одного файла
-    def process_single_file(input_path, explicit_cover=None, explicit_output=None, explicit_title=None, explicit_author=None, explicit_lang=''):
+    def process_single_file(input_path, explicit_cover=None, explicit_output=None, explicit_title=None, explicit_author=None, explicit_lang='', media_dir='.', media_recursive=True):
         """Обрабатывает один ODT файл. Возвращает True при успехе."""
         input_path = os.path.abspath(input_path)
 
@@ -856,24 +857,45 @@ def main():
             cover_mime_type = get_image_mime_type(ext)
             log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
         else:
-            # Автопоиск обложки
+            # Автопоиск обложки в media-директории (по умолчанию: текущая папка с подпапками)
             odt_stem = Path(input_path).stem
-            odt_dir = Path(input_path).parent
 
-            for ext in SUPPORTED_IMAGE_EXTENSIONS:
-                candidate = odt_dir / f'{odt_stem}{ext}'
-                if candidate.exists():
-                    try:
-                        with open(str(candidate), 'rb') as f:
-                            cover_buffer = f.read()
-                        cover_mime_type = get_image_mime_type(ext)
-                        log_ok(f'Обложка найдена автоматически: {candidate.name} ({cover_mime_type})')
-                        break
-                    except Exception as e:
-                        log_error(f'Ошибка чтения найденной обложки {candidate.name}: {e}')
-                        cover_buffer = None
+            def _find_cover_in(dir_path):
+                for ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    candidate = dir_path / f'{odt_stem}{ext}'
+                    if candidate.exists():
+                        return candidate
+                return None
+
+            found_candidate = None
+            search_root = os.path.abspath(media_dir) if media_dir else '.'
+            if not os.path.isdir(search_root):
+                log_error(f'Папка медиа не найдена: {search_root}')
+            elif media_recursive and not args.no_recursive:
+                # Рекурсивный обход: сначала более мелкие уровни глубины
+                matches = []
+                for root, dirs, files in os.walk(search_root):
+                    dirs.sort()
+                    cand = _find_cover_in(Path(root))
+                    if cand:
+                        matches.append((root.count(os.sep), cand))
+                if matches:
+                    matches.sort(key=lambda x: x[0])
+                    found_candidate = matches[0][1]
             else:
-                log('ℹ️  Обложка не указана и не найдена рядом с ODT файлом')
+                found_candidate = _find_cover_in(Path(search_root))
+
+            if found_candidate:
+                try:
+                    with open(str(found_candidate), 'rb') as f:
+                        cover_buffer = f.read()
+                    cover_mime_type = get_image_mime_type(found_candidate.suffix.lower())
+                    log_ok(f'Обложка найдена автоматически: {found_candidate} ({cover_mime_type})')
+                except Exception as e:
+                    log_error(f'Ошибка чтения найденной обложки {found_candidate.name}: {e}')
+                    cover_buffer = None
+            else:
+                log('ℹ️  Обложка не указана и не найдена в папке медиа (по умолчанию: текущая папка с подпапками)')
 
         # Определяем выходной путь
         if explicit_output:
@@ -1037,7 +1059,9 @@ def main():
             explicit_output=args.output,
             explicit_title=args.title,
             explicit_author=args.author,
-            explicit_lang=args.lang
+            explicit_lang=args.lang,
+            media_dir=args.media_dir,
+            media_recursive=not args.no_recursive
         )
     else:
         # Обрабатываем каждый файл
@@ -1056,7 +1080,9 @@ def main():
                     explicit_output=None,  # В пакетном режиме всегда автоимя
                     explicit_title=args.title,
                     explicit_author=args.author,
-                    explicit_lang=args.lang
+                    explicit_lang=args.lang,
+                    media_dir=args.media_dir,
+                    media_recursive=not args.no_recursive
                 ):
                     success_count += 1
                 else:
