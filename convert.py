@@ -316,6 +316,7 @@ def extract_meta(meta_xml):
     meta = {
         'title': 'Untitled',
         'author': 'Unknown',
+        'language': '',
     }
 
     if not meta_xml:
@@ -333,6 +334,8 @@ def extract_meta(meta_xml):
             meta['title'] = elem.text
         elif tag in ('creator', 'initial-creator') and elem.text:
             meta['author'] = elem.text
+        elif tag == 'language' and elem.text:
+            meta['language'] = elem.text.strip()
 
     return meta
 
@@ -774,7 +777,7 @@ def main():
     parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (только для одного файла, по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
-    parser.add_argument('-l', '--lang', default='ru', help='Язык книги (ISO 639-1, по умолчанию: ru)')
+    parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
     parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
@@ -905,6 +908,7 @@ def main():
         meta = extract_meta(odt_content.meta_xml)
         title = explicit_title or Path(input_path).stem
         author = explicit_author or meta['author'] or 'Unknown'
+        language = explicit_lang or meta['language'] or 'ru'
         log_ok(f'Метаданные: "{title}" — {author}')
 
         # Шаг 3: Конвертируем содержимое
@@ -921,7 +925,7 @@ def main():
             'title': title,
             'author': author,
             'date': generation_date,
-            'language': explicit_lang or 'und',
+            'language': language,
             'cover_image': cover_buffer,
             'cover_mime_type': cover_mime_type,
         })
@@ -942,8 +946,7 @@ def main():
         print('\n  ┌──────────────────────────────────────────┐')
         print(f'  │  📖 {title}')
         print(f'  │  ✍️  {author}')
-        if explicit_lang:
-            print(f'  │  🌐 {explicit_lang.upper()}')
+        print(f'  │  🌐 {language.upper()}')
         print(f'  │  📦 {epub_size_kb:.1f} КБ')
         print(f'  │  📁 {os.path.basename(output_path)}')
         print('  └──────────────────────────────────────────┘')
