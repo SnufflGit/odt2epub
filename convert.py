@@ -196,6 +196,7 @@ class StyleInfo:
         self.background_color = ''
         self.text_align = ''
         self.font_family = ''
+        self.break_before = False  # fo:break-before="page" — разрыв страницы перед стилем
 
 
 def parse_styles(styles_xml):
@@ -246,6 +247,7 @@ def parse_styles(styles_xml):
         para_props = find_child(elem, 'paragraph-properties')
         if para_props is not None:
             style.text_align = get_attr(para_props, 'fo:text-align')
+            style.break_before = get_attr(para_props, 'fo:break-before') == 'page'
 
         styles_map[name] = style
 
@@ -305,6 +307,7 @@ def parse_content_styles(content_xml):
             para_props = find_child(elem, 'paragraph-properties')
             if para_props is not None:
                 style.text_align = get_attr(para_props, 'fo:text-align')
+                style.break_before = get_attr(para_props, 'fo:break-before') == 'page'
 
             styles_map[name] = style
 
@@ -344,24 +347,35 @@ def extract_meta(meta_xml):
 # ODT → XHTML Converter
 # ============================================================
 
+# Методы разбиения EPUB на разделы (chapters)
+SPLIT_METHODS = ('page-break', 'heading', 'none')
+
+
 class XHTMLConverter:
-    def __init__(self, styles_map, auto_styles_map, images):
+    def __init__(self, styles_map, auto_styles_map, images, split_method='page-break'):
         self.styles_map = styles_map
         self.auto_styles_map = auto_styles_map
         self.images = images
         self.image_files = {}  # new_path -> bytes
         self.image_counter = 0
         self.css_rules = []
+        self.split_method = split_method
+        self.chapters = []  # список (title, xhtml) — результат разбиения
 
     def convert(self, content_xml):
-        """Конвертировать content.xml в XHTML"""
+        """Конвертировать content.xml в XHTML.
+
+        Возвращает (xhtml, css, image_files, chapters), где chapters —
+        список пар (заголовок_или_None, xhtml_раздела).
+        """
+        empty_chapters = [(None, '<p>Empty document</p>')]
         if not content_xml:
-            return '<p>Empty document</p>', '', {}
+            return '<p>Empty document</p>', '', {}, empty_chapters
 
         try:
             root = ET.fromstring(content_xml)
         except ET.ParseError:
-            return '<p>Parse error</p>', '', {}
+            return '<p>Parse error</p>', '', {}, [(None, '<p>Parse error</p>')]
 
         # Ищем body
         body = None
@@ -372,18 +386,163 @@ class XHTMLConverter:
                 break
 
         if body is None:
-            return '<p>Empty document</p>', '', {}
+            return '<p>Empty document</p>', '', {}, empty_chapters
 
         # Генерируем CSS из стилей
         self._generate_css()
 
-        # Конвертируем содержимое
-        xhtml = self._process_children(body)
+        # Конвертируем содержимое с разбиением на разделы
+        blocks = self._split_body(body)
+        self.chapters = self._build_chapters(blocks)
+        xhtml = ''.join(xh for _, xh in self.chapters)
 
         # Формируем итоговый CSS
         css = self._build_css()
 
-        return xhtml, css, self.image_files
+        return xhtml, css, self.image_files, self.chapters
+
+    def _split_body(self, body):
+        """Разбить body на блоки в соответствии с методом разбиения.
+
+        Блок — это «атом» разбиения: элемент верхнего уровня body, который
+        не был разрезан. Внутри блока абзацы со style break-before сохраняют
+        явный page-break.
+        """
+        top = [c for c in body if not (c.tag.split('}')[-1] if '}' in c.tag else c.tag) == 'annotation']
+
+        if self.split_method == 'none':
+            return [('block', el) for el in top]
+
+        if self.split_method == 'heading':
+            blocks = []
+            for el in top:
+                tag = el.tag.split('}')[-1] if '}' in el.tag else el.tag
+                if tag == 'h':
+                    blocks.append(('heading', el))
+                else:
+                    blocks.append(('block', el))
+            return blocks
+
+        # split_method == 'page-break' (по умолчанию)
+        # Кандидаты на разрыв: hard-break (style break-before / draw:page-break)
+        # и soft-break (стиль с fo:break-before="page" или имя стиля Chapter*)
+        candidates = []  # (индекс в top, тип разрыва)
+        for i, el in enumerate(top):
+            kind = self._break_kind(el)
+            if kind:
+                candidates.append((i, kind))
+
+        # Разрывы внутри нумерованных списков игнорируются (сохраняем нумерацию)
+        list_starts = [i for i, el in enumerate(top)
+                       if (el.tag.split('}')[-1] if '}' in el.tag else el.tag) == 'list']
+        filtered = []
+        for idx, kind in candidates:
+            if kind != 'hard' and any(ls < idx for ls in list_starts):
+                continue
+            filtered.append((idx, kind))
+        candidates = filtered
+
+        # Соседние hard-разрывы склеиваем (не создаём пустые главы)
+        kept = []
+        for idx, kind in candidates:
+            if kept and kind == 'hard' and idx == kept[-1][0] + 1:
+                continue
+            kept.append((idx, kind))
+
+        # Пустых разделов быть не должно: первый кандидат не в начале документа
+        if kept and kept[0][0] == 0:
+            kept = kept[1:]
+
+        blocks = []
+        prev = 0
+        for idx, _kind in kept:
+            for el in top[prev:idx]:
+                blocks.append(('block', el))
+            start_el = top[idx]
+            if self._has_break_attr(start_el):
+                blocks.append(('heading', start_el))
+            else:
+                blocks.append(('soft', start_el))
+            prev = idx
+        for el in top[prev:]:
+            blocks.append(('block', el))
+
+        return blocks
+
+    def _style_name(self, elem):
+        """Имя стиля текстового элемента (с учётом text:p / h / span)"""
+        return get_attr(elem, 'text:style-name') or ''
+
+    def _has_break_attr(self, elem):
+        """Проверяет явные атрибуты разрыва страницы у элемента"""
+        style_name = self._style_name(elem)
+        style_info = self.auto_styles_map.get(style_name) or self.styles_map.get(style_name)
+        if style_info and getattr(style_info, 'break_before', False):
+            return True
+        if get_attr(elem, 'fo:break-before') == 'page':
+            return True
+        for child in elem.iter():
+            ctag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if ctag == 'page-break':
+                return True
+        return False
+
+    def _break_kind(self, elem):
+        """Определить тип разрыва страницы перед элементом: hard / soft / None"""
+        if self._has_break_attr(elem):
+            return 'hard'
+        # Мягкий критерий: стиль с break-before="page" или имя стиля Chapter*
+        style_name = self._style_name(elem)
+        if style_name.startswith('Chapter'):
+            return 'soft'
+        style_info = self.auto_styles_map.get(style_name) or self.styles_map.get(style_name)
+        if style_info:
+            resolved = style_info
+            seen = set()
+            while resolved is not None and resolved.name not in seen:
+                seen.add(resolved.name)
+                if getattr(resolved, 'break_before', False):
+                    return 'soft'
+                resolved = (self.styles_map.get(resolved.parent_style)
+                            or self.auto_styles_map.get(resolved.parent_style))
+        return None
+
+    def _chapter_title(self, elem):
+        """Извлечь текст заголовка раздела из элемента h"""
+        parts = []
+        for t in elem.itertext():
+            parts.append(t)
+        title = ''.join(parts).strip()
+        return title or None
+
+    def _build_chapters(self, blocks):
+        """Собрать блоки в список разделов (title, xhtml)"""
+        chapters = []
+        cur_parts = []
+        cur_title = None
+
+        def flush():
+            if cur_parts:
+                chapters.append((cur_title, ''.join(cur_parts)))
+
+        for kind, el in blocks:
+            if kind == 'heading':
+                flush()
+                cur_parts = []
+                cur_title = self._chapter_title(el)
+                cur_parts.append(self._process_node(el))
+            elif kind == 'soft':
+                flush()
+                cur_parts = []
+                cur_title = None
+                cur_parts.append('<div class="page-break">' + self._process_node(el) + '</div>')
+            else:
+                cur_parts.append(self._process_node(el))
+
+        flush()
+        if not chapters:
+            chapters = [(None, '')]
+        return chapters
 
     def _generate_css(self):
         """Генерировать CSS правила из стилей"""
@@ -429,6 +588,7 @@ table.doc-table { border-collapse: collapse; width: 100%; margin: 1em 0; }
 table.doc-table td { border: 1px solid #ccc; padding: 0.5em; }
 .image-container { text-align: center; margin: 1em 0; }
 .image-container img { max-width: 100%; height: auto; }
+.page-break { page-break-before: always; break-before: page; }
 a { color: #0066cc; text-decoration: underline; }"""
 
         custom_css = '\n'.join(self.css_rules)
@@ -602,9 +762,16 @@ a { color: #0066cc; text-decoration: underline; }"""
 # EPUB Generator
 # ============================================================
 
-def generate_epub(xhtml, css, image_files, options):
-    """Сгенерировать EPUB файл"""
+def generate_epub(xhtml, css, image_files, options, chapters=None):
+    """Сгенерировать EPUB файл.
+
+    chapters — список пар (заголовок_или_None, xhtml_раздела). Если не передан
+    или содержит один раздел, EPUB формируется как единая глава (как раньше).
+    """
     book_uuid = str(uuid.uuid4())
+
+    if not chapters:
+        chapters = [(None, xhtml)]
 
     # Создаём ZIP
     epub_buffer = io.BytesIO()
@@ -687,25 +854,38 @@ def generate_epub(xhtml, css, image_files, options):
             manifest_items.append('    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>')
             spine_items.append('    <itemref idref="cover"/>')
 
-        # Основной контент (явно кодируем в UTF-8)
-        content_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+        # Основной контент: один XHTML-файл на раздел (главу)
+        chapter_entries = []  # (file_name, title_or_None)
+        for idx, (ch_title, ch_xhtml) in enumerate(chapters, 1):
+            chapter_file = f'chapter{idx}.xhtml'
+            chapter_title = ch_title or options['title']
+            content_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{options['language']}">
 <head>
   <meta charset="UTF-8"/>
-  <title>{escape_xml(options['title'])}</title>
+  <title>{escape_xml(chapter_title)}</title>
   <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
 <body>
   <div id="content">
-    {xhtml}
+    {ch_xhtml}
   </div>
 </body>
 </html>'''
 
-        zf.writestr('OEBPS/chapter1.xhtml', content_xhtml.encode('utf-8'))
-        manifest_items.append('    <item id="chapter1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>')
-        spine_items.append('    <itemref idref="chapter1"/>')
+            zf.writestr(f'OEBPS/{chapter_file}', content_xhtml.encode('utf-8'))
+            manifest_items.append(f'    <item id="chapter{idx}" href="{chapter_file}" media-type="application/xhtml+xml"/>')
+            spine_items.append(f'    <itemref idref="chapter{idx}"/>')
+            chapter_entries.append((chapter_file, chapter_title))
+
+        # Навигационные пункты (одна запись на главу)
+        nav_points = []
+        for order, (chapter_file, chapter_title) in enumerate(chapter_entries, 1):
+            nav_points.append(f'''    <navPoint id="navpoint{order}" playOrder="{order}">
+      <navLabel><text>{escape_xml(chapter_title)}</text></navLabel>
+      <content src="{chapter_file}"/>
+    </navPoint>''')
 
         # NCX (таблица содержимого, явно кодируем в UTF-8)
         ncx = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -718,15 +898,36 @@ def generate_epub(xhtml, css, image_files, options):
   </head>
   <docTitle><text>{escape_xml(options['title'])}</text></docTitle>
   <navMap>
-    <navPoint id="navpoint1" playOrder="1">
-      <navLabel><text>{escape_xml(options['title'])}</text></navLabel>
-      <content src="chapter1.xhtml"/>
-    </navPoint>
+{chr(10).join(nav_points)}
   </navMap>
 </ncx>'''
 
         zf.writestr('OEBPS/toc.ncx', ncx.encode('utf-8'))
         manifest_items.append('    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>')
+
+        # nav.xhtml (EPUB 3) — таблица содержимого со списком глав
+        nav_lis = []
+        for order, (chapter_file, chapter_title) in enumerate(chapter_entries, 1):
+            nav_lis.append(f'      <li><a href="{chapter_file}">{escape_xml(chapter_title)}</a></li>')
+        nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{options['language']}">
+<head>
+  <meta charset="UTF-8"/>
+  <title>{escape_xml(options['title'])}</title>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>{escape_xml(options['title'])}</h1>
+    <ol>
+{chr(10).join(nav_lis)}
+    </ol>
+  </nav>
+</body>
+</html>'''
+
+        zf.writestr('OEBPS/nav.xhtml', nav_xhtml.encode('utf-8'))
+        manifest_items.insert(0, '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>')
 
         # content.opf (манифест, явно кодируем в UTF-8)
         content_opf = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -782,6 +983,9 @@ def main():
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
+    parser.add_argument('--split-method', dest='split_method', choices=SPLIT_METHODS, default='page-break',
+                        help='Метод разбиения EPUB на разделы: page-break — по разрывам страниц ODT (по умолчанию), '
+                               'heading — по заголовкам, none — без разбиения (единая глава)')
 
     args = parser.parse_args()
 
@@ -935,9 +1139,10 @@ def main():
 
         # Шаг 3: Конвертируем содержимое
         log_step('3/5', 'Конвертация содержимого в XHTML...')
-        converter = XHTMLConverter(styles_map, auto_styles_map, odt_content.images)
-        xhtml, css, image_files = converter.convert(odt_content.content_xml)
+        converter = XHTMLConverter(styles_map, auto_styles_map, odt_content.images, split_method=args.split_method)
+        xhtml, css, image_files, chapters = converter.convert(odt_content.content_xml)
         log_ok(f'XHTML сгенерирован ({len(xhtml)} символов, {len(image_files)} изображений)')
+        log_ok(f'Разбиение: метод "{args.split_method}", разделов: {len(chapters)}')
 
         # Шаг 4: Генерируем EPUB
         log_step('4/5', 'Сборка EPUB...')
@@ -950,7 +1155,7 @@ def main():
             'language': language,
             'cover_image': cover_buffer,
             'cover_mime_type': cover_mime_type,
-        })
+        }, chapters=chapters)
         epub_size_kb = len(epub_buffer) / 1024
         log_ok(f'EPUB собран ({epub_size_kb:.1f} КБ)')
 
