@@ -388,6 +388,13 @@ class XHTMLConverter:
         if body is None:
             return '<p>Empty document</p>', '', {}, empty_chapters
 
+        # office:body содержит office:text — содержимое документа находится там
+        for child in body:
+            ctag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if ctag == 'text':
+                body = child
+                break
+
         # Генерируем CSS из стилей
         self._generate_css()
 
@@ -596,34 +603,42 @@ a { color: #0066cc; text-decoration: underline; }"""
 
     def _process_node(self, elem):
         """Обработать узел"""
-        # Текстовый узел
-        if elem.text:
-            result = escape_html(elem.text)
-        else:
-            result = ''
-
-        # Обработать дочерние элементы
         tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+
+        # Для блочных элементов текст элемента идёт внутрь тега, а не перед ним
+        if tag in ('h', 'p'):
+            result = ''
+        elif tag == 'span':
+            result = ''
+        else:
+            result = escape_html(elem.text) if elem.text else ''
+
+        # Офисные контейнеры (office:text, office:body) — прозрачные, просто спускаться вниз
+        if tag in ('text', 'body'):
+            return result + self._process_children(elem)
 
         if tag == 'h':
             level = int(get_attr(elem, 'text:outline-level') or '1')
             level = max(1, min(6, level))
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
             result += f'<h{level}>{content}</h{level}>'
 
         elif tag == 'p':
             style_name = get_attr(elem, 'text:style-name')
             safe_style = re.sub(r'[^a-zA-Z0-9_-]', '_', style_name)
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
             if safe_style:
-                result += f'<p class="{safe_style}">{content}</p>'
+                result += f'<p class=\"{safe_style}\">{content}</p>'
             else:
                 result += f'<p>{content}</p>'
 
         elif tag == 'span':
             style_name = get_attr(elem, 'text:style-name')
             safe_style = re.sub(r'[^a-zA-Z0-9_-]', '_', style_name)
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
 
             style_info = self.auto_styles_map.get(style_name) or self.styles_map.get(style_name)
             if style_info:
