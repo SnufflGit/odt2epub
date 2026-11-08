@@ -983,8 +983,12 @@ def main():
   python convert.py file1.odt file2.odt
   python convert.py /path/to/books
   python convert.py file.odt /path/to/books
-  python convert.py -e "temp/*" -e "*.draft.odt"
+  python convert.py -e "temp/*" -e "*_draft.odt"
   python convert.py --exclude-file exclude.txt
+  python convert.py document.odt --split-method heading
+
+Примечание: файлы с суффиксом _Draft в имени (например, test_Draft.odt)
+автоматически пропускаются и не обрабатываются.
         '''
     )
 
@@ -994,7 +998,7 @@ def main():
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
-    parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
+    parser.add_argument('-e', '--exclude', action='append', help='Дополнительно исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны). Файлы с суффиксом _Draft в имени пропускаются автоматически')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
