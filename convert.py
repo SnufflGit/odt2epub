@@ -388,6 +388,13 @@ class XHTMLConverter:
         if body is None:
             return '<p>Empty document</p>', '', {}, empty_chapters
 
+        # office:body содержит office:text — содержимое документа находится там
+        for child in body:
+            ctag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if ctag == 'text':
+                body = child
+                break
+
         # Генерируем CSS из стилей
         self._generate_css()
 
@@ -596,34 +603,42 @@ a { color: #0066cc; text-decoration: underline; }"""
 
     def _process_node(self, elem):
         """Обработать узел"""
-        # Текстовый узел
-        if elem.text:
-            result = escape_html(elem.text)
-        else:
-            result = ''
-
-        # Обработать дочерние элементы
         tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+
+        # Для блочных элементов текст элемента идёт внутрь тега, а не перед ним
+        if tag in ('h', 'p'):
+            result = ''
+        elif tag == 'span':
+            result = ''
+        else:
+            result = escape_html(elem.text) if elem.text else ''
+
+        # Офисные контейнеры (office:text, office:body) — прозрачные, просто спускаться вниз
+        if tag in ('text', 'body'):
+            return result + self._process_children(elem)
 
         if tag == 'h':
             level = int(get_attr(elem, 'text:outline-level') or '1')
             level = max(1, min(6, level))
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
             result += f'<h{level}>{content}</h{level}>'
 
         elif tag == 'p':
             style_name = get_attr(elem, 'text:style-name')
             safe_style = re.sub(r'[^a-zA-Z0-9_-]', '_', style_name)
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
             if safe_style:
-                result += f'<p class="{safe_style}">{content}</p>'
+                result += f'<p class=\"{safe_style}\">{content}</p>'
             else:
                 result += f'<p>{content}</p>'
 
         elif tag == 'span':
             style_name = get_attr(elem, 'text:style-name')
             safe_style = re.sub(r'[^a-zA-Z0-9_-]', '_', style_name)
-            content = self._process_children(elem)
+            content = escape_html(elem.text) if elem.text else ''
+            content += self._process_children(elem)
 
             style_info = self.auto_styles_map.get(style_name) or self.styles_map.get(style_name)
             if style_info:
@@ -968,8 +983,12 @@ def main():
   python convert.py file1.odt file2.odt
   python convert.py /path/to/books
   python convert.py file.odt /path/to/books
-  python convert.py -e "temp/*" -e "*.draft.odt"
+  python convert.py -e "temp/*" -e "*_draft.odt"
   python convert.py --exclude-file exclude.txt
+  python convert.py document.odt --split-method heading
+
+Примечание: файлы с суффиксом _Draft в имени (например, test_Draft.odt)
+автоматически пропускаются и не обрабатываются.
         '''
     )
 
@@ -979,7 +998,7 @@ def main():
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
-    parser.add_argument('-e', '--exclude', action='append', help='Исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны)')
+    parser.add_argument('-e', '--exclude', action='append', help='Дополнительно исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны). Файлы с суффиксом _Draft в имени пропускаются автоматически')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
@@ -1013,6 +1032,10 @@ def main():
         """Проверяет, должен ли файл быть исключён"""
         file_path_str = str(file_path)
         file_name = file_path.name
+
+        # Файлы с суффиксом Draft (через подчёркивание) не обрабатываются
+        if Path(file_name).stem.lower().endswith('_draft'):
+            return True
 
         for pattern in exclude_patterns:
             # Проверяем точное совпадение
@@ -1234,7 +1257,9 @@ def main():
         if os.path.isfile(path):
             # Это файл
             if path.lower().endswith('.odt'):
-                if not should_exclude(Path(path)):
+                if should_exclude(Path(path)):
+                    log(f'⏭️  Файл пропущен (исключение): {os.path.basename(path)}')
+                else:
                     all_files.append(path)
             else:
                 log_error(f'Файл не является ODT: {path}')
