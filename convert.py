@@ -1029,6 +1029,10 @@ def main():
         file_path_str = str(file_path)
         file_name = file_path.name
 
+        # Файлы с суффиксом Draft (через подчёркивание) не обрабатываются
+        if Path(file_name).stem.lower().endswith('_draft'):
+            return True
+
         for pattern in exclude_patterns:
             # Проверяем точное совпадение
             if file_path_str == pattern or file_name == pattern:
@@ -1249,7 +1253,9 @@ def main():
         if os.path.isfile(path):
             # Это файл
             if path.lower().endswith('.odt'):
-                if not should_exclude(Path(path)):
+                if should_exclude(Path(path)):
+                    log(f'⏭️  Файл пропущен (исключение): {os.path.basename(path)}')
+                else:
                     all_files.append(path)
             else:
                 log_error(f'Файл не является ODT: {path}')
