@@ -29,6 +29,7 @@ import zipfile
 import uuid
 import re
 import io
+import subprocess
 from datetime import datetime
 from xml.etree import ElementTree as ET
 from pathlib import Path
@@ -974,12 +975,13 @@ def generate_epub(xhtml, css, image_files, options, chapters=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Конвертация ODT документа в EPUB с сохранением форматирования',
+        description='Конвертация ODT документа в EPUB или Markdown',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Примеры:
   python convert.py
   python convert.py document.odt
+    python convert.py document.odt --format md
   python convert.py file1.odt file2.odt
   python convert.py /path/to/books
   python convert.py file.odt /path/to/books
@@ -987,18 +989,19 @@ def main():
   python convert.py --exclude-file exclude.txt
   python convert.py document.odt --split-method heading
 
-Примечание: файлы с суффиксом _Draft в имени (например, test_Draft.odt)
-автоматически пропускаются и не обрабатываются.
+Примечание: файлы, начинающиеся с _ или имеющие суффикс _Draft (например,
+_notes.odt или test_Draft.odt), автоматически пропускаются.
         '''
     )
 
     parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
+    parser.add_argument('--format', choices=('epub', 'md'), default='epub', help='Формат результата: epub (по умолчанию) или md (через Pandoc)')
     parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF). Если не указан, ищется файл с тем же именем, что и ODT')
-    parser.add_argument('-o', '--output', help='Путь для выходного EPUB файла (только для одного файла, по умолчанию: имя ODT + суффикс _(hh:mm_dd.MM.YYYY) + .epub)')
+    parser.add_argument('-o', '--output', help='Путь для выходного файла (только для одного файла; по умолчанию — имя ODT с расширением выбранного формата)')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
     parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
-    parser.add_argument('-e', '--exclude', action='append', help='Дополнительно исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны). Файлы с суффиксом _Draft в имени пропускаются автоматически')
+    parser.add_argument('-e', '--exclude', action='append', help='Дополнительно исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны). Файлы, начинающиеся с _ или имеющие суффикс _Draft, пропускаются автоматически')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
     parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
@@ -1009,7 +1012,7 @@ def main():
     args = parser.parse_args()
 
     print('\n  ╔══════════════════════════════════════════╗')
-    print('  ║       ODT → EPUB Converter v1.0.0       ║')
+    print('  ║          ODT Converter v1.0.0           ║')
     print('  ╚══════════════════════════════════════════╝\n')
 
     # Загрузка списка исключений
@@ -1033,7 +1036,11 @@ def main():
         file_path_str = str(file_path)
         file_name = file_path.name
 
-        # Файлы с суффиксом Draft (через подчёркивание) не обрабатываются
+        # Исходные файлы с подчёркиванием в начале имени не обрабатываются.
+        if Path(file_path).is_file() and file_name.startswith('_'):
+            return True
+
+        # Файлы с суффиксом Draft (через подчёркивание) не обрабатываются.
         if Path(file_name).stem.lower().endswith('_draft'):
             return True
 
@@ -1062,6 +1069,31 @@ def main():
         if not input_path.lower().endswith('.odt'):
             log_error(f'Файл должен иметь расширение .odt: {input_path}')
             return False
+
+        if args.format == 'md':
+            output_path = os.path.abspath(explicit_output) if explicit_output else str(Path(input_path).with_suffix('.md'))
+            log_step('1/1', 'Конвертация ODT в Markdown с Pandoc...')
+            try:
+                subprocess.run(
+                    ['pandoc', '--from=odt', '--to=markdown', input_path, '--output', output_path],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                )
+            except FileNotFoundError:
+                log_error('Pandoc не найден. Установите Pandoc и добавьте его в PATH.')
+                return False
+            except subprocess.CalledProcessError as e:
+                error = e.stderr.strip() or str(e)
+                log_error(f'Ошибка Pandoc: {error}')
+                return False
+            except OSError as e:
+                log_error(f'Ошибка запуска Pandoc: {e}')
+                return False
+
+            log_ok(f'Markdown сохранён: {output_path}')
+            return True
 
         # Проверяем обложку
         cover_buffer = None
