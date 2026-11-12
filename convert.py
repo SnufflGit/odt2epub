@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-ODT → EPUB Converter
+ODT/Markdown Converter
 
-Конвертация ODT документа в EPUB с сохранением форматирования.
+Конвертация ODT, Markdown, TXT и PDF документов в EPUB, Markdown, PDF или TXT.
 Поддерживает JPEG/PNG обложку.
 
 Использование:
@@ -12,7 +12,7 @@ ODT → EPUB Converter
 
     Если пути не указаны, обрабатывается текущая директория.
     Если путь указывает на файл — конвертируется только этот файл.
-    Если путь указывает на директорию — конвертируются все ODT файлы в ней.
+    Если путь указывает на директорию — конвертируются все поддерживаемые файлы в ней.
 
 Примеры:
     python convert.py
@@ -20,6 +20,10 @@ ODT → EPUB Converter
     python convert.py /path/to/books
     python convert.py file1.odt file2.odt /path/to/books
     python convert.py -d /path/to/books -e "temp/*" --exclude-file exclude.txt
+    python convert.py books/ --mode summary
+    python convert.py books/ --mode quiet
+    python convert.py document.odt --format pdf
+    python convert.py document.odt --format txt
 """
 
 import argparse
@@ -30,9 +34,12 @@ import uuid
 import re
 import io
 import subprocess
+import tempfile
+import shutil
+import posixpath
 from datetime import datetime
 from xml.etree import ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from fnmatch import fnmatch
 
 # Namespaces
@@ -49,29 +56,83 @@ NAMESPACES = {
     'svg': 'urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0',
 }
 
+OUTPUT_MODE = 'verbose'
+LOG_FILE_PATH = None
+DEFAULT_AUTHOR = 'Шмель'
+DEFAULT_PUBLISHER = 'Самиздат'
+DEFAULT_RIGHTS = '© Шмель, 2026'
+
 # Register namespaces for output
 for prefix, uri in NAMESPACES.items():
     ET.register_namespace(prefix, uri)
 
 
+def write_file_log(*args, **kwargs):
+    """Записать строку журнала, не меняя вывод в консоль."""
+    global LOG_FILE_PATH
+
+    if not LOG_FILE_PATH:
+        return
+
+    log_kwargs = dict(kwargs)
+    log_kwargs.pop('file', None)
+    try:
+        with open(LOG_FILE_PATH, 'a', encoding='utf-8') as log_file:
+            print(*args, file=log_file, **log_kwargs)
+    except OSError as e:
+        failed_path = LOG_FILE_PATH
+        LOG_FILE_PATH = None
+        print(f'Не удалось записать журнал {failed_path}: {e}; дальнейшее логирование отключено.', file=sys.stderr)
+
+
+def verbose_print(*args, **kwargs):
+    """Вывести сообщение только в подробном режиме"""
+    if OUTPUT_MODE == 'verbose':
+        print(*args, **kwargs)
+    write_file_log(*args, **kwargs)
+
+
 def log(msg):
     """Вывести сообщение"""
-    print(f"  {msg}")
+    verbose_print(f"  {msg}")
 
 
 def log_step(step, msg):
     """Вывести шаг"""
-    print(f"\n  [{step}] {msg}")
+    verbose_print(f"\n  [{step}] {msg}")
 
 
 def log_ok(msg):
     """Вывести успех"""
-    print(f"  ✅ {msg}")
+    verbose_print(f"  ✅ {msg}")
 
 
-def log_error(msg):
+def log_error(msg, critical=True):
     """Вывести ошибку"""
-    print(f"  ❌ {msg}", file=sys.stderr)
+    error_message = f"  ❌ {msg}"
+    if OUTPUT_MODE != 'quiet' or critical:
+        print(error_message, file=sys.stderr)
+    write_file_log(error_message)
+
+
+def log_warning(msg):
+    """Вывести предупреждение, кроме тихого режима."""
+    warning_message = f"  ⚠️ Предупреждение: {msg}"
+    if OUTPUT_MODE != 'quiet':
+        print(warning_message, file=sys.stderr)
+    write_file_log(warning_message)
+
+
+def warn_missing_external_utilities():
+    """Предупредить об отсутствующих внешних утилитах конвертации."""
+    utilities = {
+        'pandoc': 'часть маршрутов конвертации требует Pandoc',
+        'pdftotext': 'извлечение текста из PDF требует Poppler',
+        'pdftoppm': 'обработка сканированных PDF требует Poppler',
+    }
+    for utility, purpose in utilities.items():
+        if shutil.which(utility) is None:
+            log_warning(f'{utility} не найден в PATH; {purpose}.')
 
 
 def escape_html(text):
@@ -114,6 +175,21 @@ def get_image_mime_type(ext):
 
 # Поддерживаемые расширения изображений для обложек
 SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif')
+
+SUPPORTED_EPUB_MEDIA_TYPES = {
+    '.mp3': ('audio', 'audio/mpeg'),
+    '.m4a': ('audio', 'audio/mp4'),
+    '.m4b': ('audio', 'audio/mp4'),
+    '.aac': ('audio', 'audio/aac'),
+    '.ogg': ('audio', 'audio/ogg'),
+    '.oga': ('audio', 'audio/ogg'),
+    '.opus': ('audio', 'audio/ogg'),
+    '.wav': ('audio', 'audio/wav'),
+    '.mp4': ('video', 'video/mp4'),
+    '.m4v': ('video', 'video/mp4'),
+    '.ogv': ('video', 'video/ogg'),
+    '.webm': ('video', 'video/webm'),
+}
 
 
 def get_attr(elem, *names):
@@ -319,7 +395,9 @@ def extract_meta(meta_xml):
     """Извлечь метаданные"""
     meta = {
         'title': 'Untitled',
-        'author': 'Unknown',
+        'author': DEFAULT_AUTHOR,
+        'publisher': '',
+        'rights': '',
         'language': '',
     }
 
@@ -338,6 +416,10 @@ def extract_meta(meta_xml):
             meta['title'] = elem.text
         elif tag in ('creator', 'initial-creator') and elem.text:
             meta['author'] = elem.text
+        elif tag == 'publisher' and elem.text:
+            meta['publisher'] = elem.text.strip()
+        elif tag == 'rights' and elem.text:
+            meta['rights'] = elem.text.strip()
         elif tag == 'language' and elem.text:
             meta['language'] = elem.text.strip()
 
@@ -944,6 +1026,9 @@ def generate_epub(xhtml, css, image_files, options, chapters=None):
 
         zf.writestr('OEBPS/nav.xhtml', nav_xhtml.encode('utf-8'))
         manifest_items.insert(0, '    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>')
+        if options.get('interactive_toc'):
+            toc_position = 1 if has_cover else 0
+            spine_items.insert(toc_position, '    <itemref idref="nav"/>')
 
         # content.opf (манифест, явно кодируем в UTF-8)
         content_opf = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -952,6 +1037,8 @@ def generate_epub(xhtml, css, image_files, options, chapters=None):
     <dc:identifier id="bookid">urn:uuid:{book_uuid}</dc:identifier>
     <dc:title>{escape_xml(options['title'])}</dc:title>
     <dc:creator>{escape_xml(options['author'])}</dc:creator>
+    <dc:publisher>{escape_xml(options.get('publisher') or DEFAULT_PUBLISHER)}</dc:publisher>
+    <dc:rights>{escape_xml(options.get('rights') or DEFAULT_RIGHTS)}</dc:rights>
     <dc:language>{options['language']}</dc:language>
     <dc:date>{options['date']}</dc:date>
     <meta property="dcterms:modified">{datetime.now().isoformat(timespec='seconds').replace('+00:00', 'Z')}</meta>
@@ -969,13 +1056,545 @@ def generate_epub(xhtml, css, image_files, options, chapters=None):
     return epub_buffer.getvalue()
 
 
+def _set_epub_metadata(
+    package,
+    opf_ns,
+    identifier,
+    layout_method,
+    author=None,
+    publisher=None,
+    rights=None,
+):
+    metadata = package.find(f'{{{opf_ns}}}metadata')
+    if metadata is None:
+        metadata = ET.SubElement(package, f'{{{opf_ns}}}metadata')
+
+    dc_ns = 'http://purl.org/dc/elements/1.1/'
+    creators = metadata.findall(f'{{{dc_ns}}}creator')
+    creator = next(
+        (element for element in creators if element.text and element.text.strip()),
+        creators[0] if creators else None,
+    )
+    if creator is None:
+        creator = ET.SubElement(metadata, f'{{{dc_ns}}}creator')
+    if author is not None:
+        creator.text = author
+    elif not any(element.text and element.text.strip() for element in creators):
+        creator.text = DEFAULT_AUTHOR
+
+    publisher_element = metadata.find(f'{{{dc_ns}}}publisher')
+    if publisher_element is None:
+        publisher_element = ET.SubElement(metadata, f'{{{dc_ns}}}publisher')
+    if publisher is not None:
+        publisher_element.text = publisher
+    elif not publisher_element.text or not publisher_element.text.strip():
+        publisher_element.text = DEFAULT_PUBLISHER
+    rights_element = metadata.find(f'{{{dc_ns}}}rights')
+    if rights_element is None:
+        rights_element = ET.SubElement(metadata, f'{{{dc_ns}}}rights')
+    if rights is not None:
+        rights_element.text = rights
+    elif not rights_element.text or not rights_element.text.strip():
+        rights_element.text = DEFAULT_RIGHTS
+
+    unique_identifier_id = package.get('unique-identifier')
+    identifiers = metadata.findall(f'{{{dc_ns}}}identifier')
+    identifier_element = next(
+        (
+            element
+            for element in identifiers
+            if element.get('id') == unique_identifier_id
+        ),
+        identifiers[0] if identifiers else None,
+    )
+
+    if identifier_element is None:
+        identifier_id = unique_identifier_id or 'book-identifier'
+        existing_ids = {
+            element.get('id')
+            for element in metadata
+            if element.get('id')
+        }
+        base_identifier_id = identifier_id
+        suffix = 1
+        while identifier_id in existing_ids:
+            suffix += 1
+            identifier_id = f'{base_identifier_id}-{suffix}'
+        identifier_element = ET.SubElement(
+            metadata,
+            f'{{{dc_ns}}}identifier',
+            {'id': identifier_id},
+        )
+        package.set('unique-identifier', identifier_id)
+    elif not identifier_element.get('id'):
+        identifier_id = unique_identifier_id or 'book-identifier'
+        identifier_element.set('id', identifier_id)
+        package.set('unique-identifier', identifier_id)
+    elif package.get('unique-identifier') != identifier_element.get('id'):
+        package.set('unique-identifier', identifier_element.get('id'))
+
+    if identifier is not None:
+        identifier_element.text = identifier
+    elif not identifier_element.text:
+        identifier_element.text = f'urn:uuid:{uuid.uuid4()}'
+
+    prefix = package.get('prefix', '')
+    if not re.search(r'(^|\s)rendition:', prefix):
+        prefix = ' '.join(
+            part for part in (
+                prefix,
+                'rendition: http://www.idpf.org/vocab/rendition/#',
+            )
+            if part
+        )
+        package.set('prefix', prefix)
+
+    layout_elements = [
+        element
+        for element in metadata.findall(f'{{{opf_ns}}}meta')
+        if element.get('property') == 'rendition:layout'
+    ]
+    if layout_elements:
+        if layout_method is None:
+            layout_method = layout_elements[0].text or 'reflowable'
+        layout_elements[0].text = layout_method
+        for duplicate in layout_elements[1:]:
+            metadata.remove(duplicate)
+    else:
+        layout_method = layout_method or 'reflowable'
+        ET.SubElement(
+            metadata,
+            f'{{{opf_ns}}}meta',
+            {'property': 'rendition:layout'},
+        ).text = layout_method
+
+    return identifier_element.text
+
+
+def update_epub_metadata(
+    epub_path,
+    identifier=None,
+    layout_method='reflowable',
+    author=None,
+    publisher=None,
+    rights=None,
+):
+    epub_path = os.path.abspath(epub_path)
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix='.epub-metadata-',
+        suffix='.tmp',
+        dir=os.path.dirname(epub_path),
+    )
+    os.close(temp_fd)
+
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as source:
+            archive_names = {info.filename for info in source.infolist()}
+            container = ET.fromstring(source.read('META-INF/container.xml'))
+            container_ns = 'urn:oasis:names:tc:opendocument:xmlns:container'
+            rootfile = container.find(f'.//{{{container_ns}}}rootfile')
+            if rootfile is None or not rootfile.get('full-path'):
+                raise ValueError('В EPUB не найден основной OPF-файл')
+
+            opf_path = rootfile.get('full-path')
+            package_directory = PurePosixPath(opf_path).parent
+            package = ET.fromstring(source.read(opf_path))
+            opf_ns = package.tag[1:].split('}', 1)[0] if package.tag.startswith('{') else ''
+            manifest = package.find(f'{{{opf_ns}}}manifest')
+            if manifest is None:
+                raise ValueError('В EPUB отсутствует manifest')
+
+            effective_identifier = _set_epub_metadata(
+                package,
+                opf_ns,
+                identifier,
+                layout_method,
+                author,
+                publisher,
+                rights,
+            )
+            updates = {
+                opf_path: ET.tostring(package, encoding='utf-8'),
+            }
+
+            ncx_item = next(
+                (
+                    item
+                    for item in manifest.findall(f'{{{opf_ns}}}item')
+                    if item.get('media-type') == 'application/x-dtbncx+xml'
+                ),
+                None,
+            )
+            if ncx_item is not None and ncx_item.get('href'):
+                ncx_path = posixpath.normpath(
+                    posixpath.join(str(package_directory), ncx_item.get('href').split('#', 1)[0])
+                )
+                if ncx_path in archive_names:
+                    ncx_document = ET.fromstring(source.read(ncx_path))
+                    ncx_ns = ncx_document.tag[1:].split('}', 1)[0] if ncx_document.tag.startswith('{') else ''
+                    head = ncx_document.find(f'{{{ncx_ns}}}head')
+                    if head is not None:
+                        uid_meta = next(
+                            (
+                                element
+                                for element in head.findall(f'{{{ncx_ns}}}meta')
+                                if element.get('name') == 'dtb:uid'
+                            ),
+                            None,
+                        )
+                        if uid_meta is None:
+                            uid_meta = ET.SubElement(
+                                head,
+                                f'{{{ncx_ns}}}meta',
+                                {'name': 'dtb:uid'},
+                            )
+                        uid_meta.set('content', effective_identifier)
+                        updates[ncx_path] = ET.tostring(
+                            ncx_document,
+                            encoding='utf-8',
+                        )
+
+            with zipfile.ZipFile(temp_path, 'w') as target:
+                target.comment = source.comment
+                for info in source.infolist():
+                    if info.filename in updates:
+                        target.writestr(info, updates.pop(info.filename))
+                    else:
+                        with source.open(info, 'r') as source_file:
+                            with target.open(info, 'w') as target_file:
+                                shutil.copyfileobj(source_file, target_file)
+                for archive_path, content in updates.items():
+                    target.writestr(archive_path, content, compress_type=zipfile.ZIP_DEFLATED)
+
+        os.replace(temp_path, epub_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    return effective_identifier
+
+
+def add_media_files_to_epub(
+    epub_path,
+    media_paths,
+    media_root,
+    identifier=None,
+    layout_method='reflowable',
+    author=None,
+    publisher=None,
+    rights=None,
+):
+    """Добавить аудио/видео, страницу воспроизведения и записи EPUB-манифеста."""
+    media_paths = [
+        Path(path)
+        for path in media_paths
+        if Path(path).suffix.lower() in SUPPORTED_EPUB_MEDIA_TYPES
+    ]
+    if not media_paths:
+        return 0
+
+    epub_path = os.path.abspath(epub_path)
+    temp_fd, temp_path = tempfile.mkstemp(
+        prefix='.epub-media-',
+        suffix='.tmp',
+        dir=os.path.dirname(epub_path),
+    )
+    os.close(temp_fd)
+
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as source:
+            archive_names = {info.filename for info in source.infolist()}
+            container = ET.fromstring(source.read('META-INF/container.xml'))
+            container_ns = 'urn:oasis:names:tc:opendocument:xmlns:container'
+            rootfile = container.find(f'.//{{{container_ns}}}rootfile')
+            if rootfile is None or not rootfile.get('full-path'):
+                raise ValueError('В EPUB не найден основной OPF-файл')
+
+            opf_path = rootfile.get('full-path')
+            package_directory = PurePosixPath(opf_path).parent
+            package = ET.fromstring(source.read(opf_path))
+            opf_ns = package.tag[1:].split('}', 1)[0] if package.tag.startswith('{') else ''
+            manifest = package.find(f'{{{opf_ns}}}manifest')
+            spine = package.find(f'{{{opf_ns}}}spine')
+            if manifest is None or spine is None:
+                raise ValueError('В EPUB отсутствует manifest или spine')
+
+            effective_identifier = _set_epub_metadata(
+                package,
+                opf_ns,
+                identifier,
+                layout_method,
+                author,
+                publisher,
+                rights,
+            )
+            used_ids = {
+                item.get('id')
+                for item in manifest.findall(f'{{{opf_ns}}}item')
+                if item.get('id')
+            }
+
+            def unique_id(prefix):
+                candidate = prefix
+                suffix = 1
+                while candidate in used_ids:
+                    suffix += 1
+                    candidate = f'{prefix}-{suffix}'
+                used_ids.add(candidate)
+                return candidate
+
+            page_name = 'media.xhtml'
+            page_suffix = 1
+            page_archive_path = str(package_directory / page_name)
+            while page_archive_path in archive_names:
+                page_suffix += 1
+                page_name = f'media-{page_suffix}.xhtml'
+                page_archive_path = str(package_directory / page_name)
+
+            media_directory_name = 'media-assets'
+            media_directory_path = str(package_directory / media_directory_name)
+            while any(
+                name == media_directory_path or name.startswith(media_directory_path + '/')
+                for name in archive_names
+            ):
+                media_directory_name += '-extra'
+                media_directory_path = str(package_directory / media_directory_name)
+
+            media_root = Path(os.path.abspath(media_root))
+            media_page_items = []
+            media_archive_paths = []
+            for index, media_path in enumerate(media_paths, start=1):
+                media_kind, mime_type = SUPPORTED_EPUB_MEDIA_TYPES[media_path.suffix.lower()]
+                media_name = f'asset-{index:04d}{media_path.suffix.lower()}'
+                media_href = f'{media_directory_name}/{media_name}'
+                media_archive_path = str(package_directory / media_href)
+                try:
+                    label = media_path.relative_to(media_root).as_posix()
+                except ValueError:
+                    label = media_path.name
+
+                item_id = unique_id(f'external-media-{index}')
+                ET.SubElement(
+                    manifest,
+                    f'{{{opf_ns}}}item',
+                    {
+                        'id': item_id,
+                        'href': media_href,
+                        'media-type': mime_type,
+                    },
+                )
+                media_archive_paths.append((media_archive_path, media_path))
+                media_element = (
+                    f'<{media_kind} controls="controls" preload="metadata">'
+                    f'<source src="{media_href}" type="{mime_type}"/>'
+                    f'Воспроизведение не поддерживается этой EPUB-читалкой.'
+                    f'</{media_kind}>'
+                )
+                media_page_items.append(
+                    f'<section><h2>{escape_xml(label)}</h2>{media_element}</section>'
+                )
+
+            page_id = unique_id('external-media-page')
+            ET.SubElement(
+                manifest,
+                f'{{{opf_ns}}}item',
+                {
+                    'id': page_id,
+                    'href': page_name,
+                    'media-type': 'application/xhtml+xml',
+                },
+            )
+            ET.SubElement(spine, f'{{{opf_ns}}}itemref', {'idref': page_id})
+
+            language = 'ru'
+            metadata = package.find(f'{{{opf_ns}}}metadata')
+            if metadata is not None:
+                dc_ns = 'http://purl.org/dc/elements/1.1/'
+                language_node = metadata.find(f'{{{dc_ns}}}language')
+                if language_node is not None and language_node.text:
+                    language = language_node.text
+
+            media_page = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{escape_xml(language)}">
+<head><meta charset="UTF-8"/><title>Медиафайлы</title></head>
+<body><h1>Медиафайлы</h1>{''.join(media_page_items)}</body>
+</html>'''
+
+            updates = {
+                opf_path: ET.tostring(package, encoding='utf-8'),
+                page_archive_path: media_page.encode('utf-8'),
+            }
+
+            nav_item = next(
+                (
+                    item
+                    for item in manifest.findall(f'{{{opf_ns}}}item')
+                    if 'nav' in item.get('properties', '').split()
+                ),
+                None,
+            )
+            if nav_item is not None and nav_item.get('href'):
+                nav_path = posixpath.normpath(
+                    posixpath.join(str(package_directory), nav_item.get('href').split('#', 1)[0])
+                )
+                if nav_path in archive_names:
+                    nav_document = ET.fromstring(source.read(nav_path))
+                    xhtml_ns = nav_document.tag[1:].split('}', 1)[0] if nav_document.tag.startswith('{') else ''
+                    toc_list = nav_document.find(f'.//{{{xhtml_ns}}}ol')
+                    if toc_list is not None:
+                        nav_parent = str(PurePosixPath(nav_path).parent)
+                        nav_href = posixpath.relpath(page_archive_path, nav_parent)
+                        list_item = ET.SubElement(toc_list, f'{{{xhtml_ns}}}li')
+                        link = ET.SubElement(list_item, f'{{{xhtml_ns}}}a', {'href': nav_href})
+                        link.text = 'Медиафайлы'
+                        updates[nav_path] = ET.tostring(
+                            nav_document,
+                            encoding='utf-8',
+                        )
+
+            ncx_item = next(
+                (
+                    item
+                    for item in manifest.findall(f'{{{opf_ns}}}item')
+                    if item.get('media-type') == 'application/x-dtbncx+xml'
+                ),
+                None,
+            )
+            if ncx_item is not None and ncx_item.get('href'):
+                ncx_path = posixpath.normpath(
+                    posixpath.join(str(package_directory), ncx_item.get('href').split('#', 1)[0])
+                )
+                if ncx_path in archive_names:
+                    ncx_document = ET.fromstring(source.read(ncx_path))
+                    ncx_ns = ncx_document.tag[1:].split('}', 1)[0] if ncx_document.tag.startswith('{') else ''
+                    ncx_head = ncx_document.find(f'{{{ncx_ns}}}head')
+                    if ncx_head is not None:
+                        uid_meta = next(
+                            (
+                                element
+                                for element in ncx_head.findall(f'{{{ncx_ns}}}meta')
+                                if element.get('name') == 'dtb:uid'
+                            ),
+                            None,
+                        )
+                        if uid_meta is None:
+                            uid_meta = ET.SubElement(
+                                ncx_head,
+                                f'{{{ncx_ns}}}meta',
+                                {'name': 'dtb:uid'},
+                            )
+                        uid_meta.set('content', effective_identifier)
+                    nav_map = ncx_document.find(f'{{{ncx_ns}}}navMap')
+                    if nav_map is not None:
+                        play_orders = [
+                            int(node.get('playOrder', '0'))
+                            for node in nav_map.findall(f'.//{{{ncx_ns}}}navPoint')
+                        ]
+                        next_order = max(play_orders, default=0) + 1
+                        ncx_ids = {
+                            node.get('id')
+                            for node in nav_map.findall(f'.//{{{ncx_ns}}}navPoint')
+                            if node.get('id')
+                        }
+                        ncx_point_id = 'external-media-navigation'
+                        ncx_id_suffix = 1
+                        while ncx_point_id in ncx_ids:
+                            ncx_id_suffix += 1
+                            ncx_point_id = f'external-media-navigation-{ncx_id_suffix}'
+                        point = ET.SubElement(
+                            nav_map,
+                            f'{{{ncx_ns}}}navPoint',
+                            {
+                                'id': ncx_point_id,
+                                'playOrder': str(next_order),
+                            },
+                        )
+                        label = ET.SubElement(
+                            ET.SubElement(point, f'{{{ncx_ns}}}navLabel'),
+                            f'{{{ncx_ns}}}text',
+                        )
+                        label.text = 'Медиафайлы'
+                        ncx_parent = str(PurePosixPath(ncx_path).parent)
+                        ncx_href = posixpath.relpath(page_archive_path, ncx_parent)
+                        ET.SubElement(point, f'{{{ncx_ns}}}content', {'src': ncx_href})
+                        updates[ncx_path] = ET.tostring(
+                            ncx_document,
+                            encoding='utf-8',
+                        )
+
+            with zipfile.ZipFile(temp_path, 'w') as target:
+                target.comment = source.comment
+                for info in source.infolist():
+                    if info.filename in updates:
+                        target.writestr(info, updates.pop(info.filename))
+                    else:
+                        with source.open(info, 'r') as source_file:
+                            with target.open(info, 'w') as target_file:
+                                shutil.copyfileobj(source_file, target_file)
+                for archive_path, content in updates.items():
+                    target.writestr(archive_path, content, compress_type=zipfile.ZIP_DEFLATED)
+                for archive_path, media_path in media_archive_paths:
+                    target.write(
+                        str(media_path),
+                        archive_path,
+                        compress_type=zipfile.ZIP_DEFLATED,
+                    )
+
+        os.replace(temp_path, epub_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    return len(media_archive_paths)
+
+
 # ============================================================
 # Main
 # ============================================================
 
 def main():
+    global OUTPUT_MODE, LOG_FILE_PATH
+    LOG_FILE_PATH = None
+
+    source_format_aliases = {
+        'odt': 'odt',
+        'md': 'md',
+        'markdown': 'md',
+        'txt': 'txt',
+        'pdf': 'pdf',
+        'image': 'images',
+        'images': 'images',
+    }
+
+    def parse_input_formats(value):
+        formats = [part.strip().lower().lstrip('.') for part in value.split(',') if part.strip()]
+        if not formats:
+            raise argparse.ArgumentTypeError('укажите хотя бы один формат через запятую')
+        unknown_formats = sorted(set(formats) - source_format_aliases.keys())
+        if unknown_formats:
+            allowed = ', '.join(sorted(source_format_aliases))
+            raise argparse.ArgumentTypeError(
+                f'неизвестный формат {", ".join(unknown_formats)}; допустимые значения: {allowed}'
+            )
+        return [source_format_aliases[format_name] for format_name in formats]
+
+    def parse_identifier(value):
+        identifier = value.strip()
+        if not identifier:
+            raise argparse.ArgumentTypeError('идентификатор не может быть пустым')
+        return identifier
+
+    source_format_outputs = {
+        'odt': {'epub', 'md', 'pdf', 'txt'},
+        'md': {'epub', 'md', 'pdf'},
+        'txt': {'epub', 'pdf', 'txt'},
+        'pdf': {'epub', 'pdf'},
+        'images': {'epub'},
+    }
+
     parser = argparse.ArgumentParser(
-        description='Конвертация ODT документа в EPUB или Markdown',
+        description='Конвертация ODT в EPUB, Markdown, PDF или TXT; Markdown/TXT/PDF и папок с изображениями — в EPUB',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Примеры:
@@ -995,25 +1614,166 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     )
 
     parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
-    parser.add_argument('--format', choices=('epub', 'md'), default='epub', help='Формат результата: epub (по умолчанию) или md (через Pandoc)')
-    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF). Если не указан, ищется файл с тем же именем, что и ODT')
-    parser.add_argument('-o', '--output', help='Путь для выходного файла (только для одного файла; по умолчанию — имя ODT с расширением выбранного формата)')
-    parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя файла ODT без расширения)')
-    parser.add_argument('-a', '--author', help='Автор книги (по умолчанию из метаданных ODT)')
+    parser.add_argument('--format', choices=('epub', 'md', 'pdf', 'txt'), default='epub',
+                        help='Формат результата: epub (по умолчанию), md, pdf или txt; совпадающие входной и выходной форматы пропускаются')
+    parser.add_argument(
+        '--input-formats',
+        action='append',
+        type=parse_input_formats,
+        metavar='LIST',
+        help='Фильтр форматов при поиске в папках, например odt,md,txt; можно указывать несколько раз. Допустимо: odt, md/markdown, txt, pdf, images',
+    )
+    parser.add_argument('--mode', choices=('quiet', 'summary', 'verbose'), default='verbose',
+                        help='Режим вывода: quiet — только критические ошибки, summary — строка результата по файлу, verbose — подробный вывод')
+    parser.add_argument('--log-file', metavar='PATH', help='Записывать подробный журнал в файл (добавление в конец; относительный путь от текущей папки)')
+    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF); автопоиск по имени выполняется для ODT')
+    parser.add_argument('-o', '--output', help='Путь к файлу результата или папке назначения; для ODT сохраняется суффикс даты')
+    overwrite_group = parser.add_mutually_exclusive_group()
+    overwrite_group.add_argument('--ask-overwrite', action='store_true',
+                                 help='Спрашивать перед заменой существующего файла (иначе существующий файл пропускается)')
+    overwrite_group.add_argument('--force', action='store_true',
+                                 help='Принудительно перезаписывать существующие файлы без запроса')
+    parser.add_argument('--no-timestamp', action='store_true',
+                        help='Не добавлять дату и время к имени EPUB, созданного из ODT; действует и в пакетном режиме')
+    parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя исходного файла без расширения)')
+    parser.add_argument(
+        '--identifier',
+        type=parse_identifier,
+        help='Идентификатор книги для метаданных EPUB (например, ISBN или URN; по умолчанию генерируется автоматически)',
+    )
+    parser.add_argument(
+        '-a',
+        '--author',
+        help=f'Автор книги (по умолчанию из метаданных ODT или {DEFAULT_AUTHOR})',
+    )
+    parser.add_argument(
+        '--publisher',
+        default=None,
+        help=f'Издатель книги (по умолчанию: {DEFAULT_PUBLISHER})',
+    )
+    parser.add_argument(
+        '--rights',
+        default=None,
+        help=f'Информация об авторских правах (по умолчанию: {DEFAULT_RIGHTS})',
+    )
     parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
-    parser.add_argument('-e', '--exclude', action='append', help='Дополнительно исключить файл или папку (можно указывать несколько раз, поддерживает glob-паттерны). Файлы, начинающиеся с _ или имеющие суффикс _Draft, пропускаются автоматически')
+    parser.add_argument(
+        '--css',
+        metavar='PATH',
+        help='Файл CSS для оформления EPUB; для ODT его правила добавляются после автоматически созданных',
+    )
+    parser.add_argument(
+        '--toc',
+        action='store_true',
+        help='Добавить в EPUB видимое интерактивное оглавление',
+    )
+    parser.add_argument(
+        '--layout-method',
+        choices=('reflowable', 'pre-paginated'),
+        default=None,
+        help='Режим компоновки EPUB: reflowable (по умолчанию) или pre-paginated',
+    )
+    parser.add_argument('-e', '--exclude', action='append',
+                        help='Исключить файл или папку (можно повторять; glob-шаблоны сверяются с именем и относительным путём)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
-    parser.add_argument('-m', '--media-dir', dest='media_dir', default='.', help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
-    parser.add_argument('--split-method', dest='split_method', choices=SPLIT_METHODS, default='page-break',
+    parser.add_argument('-m', '--media-dir', dest='media_dir', default=None, help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
+    parser.add_argument('--split-method', dest='split_method', choices=SPLIT_METHODS, default=None,
                         help='Метод разбиения EPUB на разделы: page-break — по разрывам страниц ODT (по умолчанию), '
                                'heading — по заголовкам, none — без разбиения (единая глава)')
 
     args = parser.parse_args()
+    args.media_dir_explicit = args.media_dir is not None
+    OUTPUT_MODE = args.mode
 
-    print('\n  ╔══════════════════════════════════════════╗')
-    print('  ║          ODT Converter v1.0.0           ║')
-    print('  ╚══════════════════════════════════════════╝\n')
+    ignored_epub_options = []
+    if args.format != 'epub':
+        for attribute, option, provided, replacement in (
+            ('cover', '--cover', args.cover is not None, None),
+            ('identifier', '--identifier', args.identifier is not None, None),
+            ('publisher', '--publisher', args.publisher is not None, None),
+            ('rights', '--rights', args.rights is not None, None),
+            ('layout_method', '--layout-method', args.layout_method is not None, None),
+            ('css', '--css', args.css is not None, None),
+            ('toc', '--toc', args.toc, False),
+            ('no_timestamp', '--no-timestamp', args.no_timestamp, False),
+            ('media_dir', '--media-dir', args.media_dir_explicit, None),
+            ('split_method', '--split-method', args.split_method is not None, None),
+        ):
+            if provided:
+                ignored_epub_options.append(option)
+                setattr(args, attribute, replacement)
+        if ignored_epub_options:
+            log_error(
+                f'Параметры {", ".join(ignored_epub_options)} не применимы к формату '
+                f'{args.format} и будут пропущены.',
+                critical=False,
+            )
+
+    args.media_dir = args.media_dir or '.'
+    args.split_method = args.split_method or 'page-break'
+    if args.media_dir_explicit and args.format == 'epub' and not os.path.isdir(args.media_dir):
+        parser.error(f'папка медиа не найдена или не является папкой: {args.media_dir}')
+
+    custom_css = None
+    if args.css:
+        args.css = os.path.abspath(args.css)
+        try:
+            with open(args.css, 'r', encoding='utf-8') as css_file:
+                custom_css = css_file.read()
+        except (OSError, UnicodeError) as e:
+            parser.error(f'не удалось прочитать файл CSS {args.css}: {e}')
+
+    if args.log_file:
+        log_file_path = os.path.abspath(args.log_file)
+        try:
+            Path(log_file_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(log_file_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(f'\n=== Запуск {datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ===\n')
+        except OSError as e:
+            log_error(f'Не удалось открыть журнал {log_file_path}: {e}')
+            sys.exit(1)
+        LOG_FILE_PATH = log_file_path
+
+    warn_missing_external_utilities()
+
+    compatible_source_formats = {
+        source_format
+        for source_format, output_formats in source_format_outputs.items()
+        if args.format in output_formats
+    }
+    if args.input_formats:
+        selected_source_formats = {
+            source_format
+            for format_list in args.input_formats
+            for source_format in format_list
+        }
+        unsupported_formats = sorted(
+            source_format
+            for source_format in selected_source_formats
+            if source_format not in compatible_source_formats
+        )
+        if unsupported_formats:
+            parser.error(
+                f'Форматы источников {", ".join(unsupported_formats)} нельзя преобразовать в {args.format}'
+            )
+    else:
+        selected_source_formats = compatible_source_formats
+
+    convertible_input_extensions = {
+        f'.{source_format}'
+        for source_format in compatible_source_formats
+        if source_format != 'images'
+    }
+    input_extensions = {
+        f'.{source_format}'
+        for source_format in selected_source_formats
+        if source_format != 'images'
+    }
+
+    verbose_print('\n  ╔══════════════════════════════════════════╗')
+    verbose_print('  ║          ODT Converter v1.0.0           ║')
+    verbose_print('  ╚══════════════════════════════════════════╝\n')
 
     # Загрузка списка исключений
     exclude_patterns = []
@@ -1031,68 +1791,367 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     exclude_patterns.append(line)
 
     # Функция проверки исключений
-    def should_exclude(file_path):
+    def should_exclude(file_path, root_path=None):
         """Проверяет, должен ли файл быть исключён"""
-        file_path_str = str(file_path)
+        file_path = Path(file_path)
         file_name = file_path.name
 
+        if LOG_FILE_PATH and os.path.abspath(file_path) == LOG_FILE_PATH:
+            return True
+
         # Исходные файлы с подчёркиванием в начале имени не обрабатываются.
-        if Path(file_path).is_file() and file_name.startswith('_'):
+        if file_path.is_file() and file_name.startswith('_'):
             return True
 
         # Файлы с суффиксом Draft (через подчёркивание) не обрабатываются.
         if Path(file_name).stem.lower().endswith('_draft'):
             return True
 
+        path_candidates = {
+            file_path.as_posix(),
+            file_name,
+            Path(os.path.relpath(file_path, os.getcwd())).as_posix(),
+        }
+        if root_path is not None:
+            try:
+                path_candidates.add(file_path.relative_to(root_path).as_posix())
+            except ValueError:
+                pass
+
         for pattern in exclude_patterns:
-            # Проверяем точное совпадение
-            if file_path_str == pattern or file_name == pattern:
-                return True
-            # Проверяем glob-паттерны
-            if fnmatch(file_name, pattern) or fnmatch(file_path_str, pattern):
-                return True
-            # Проверяем, находится ли файл в исключённой папке
-            if file_path_str.startswith(pattern + os.sep) or pattern + os.sep in file_path_str:
-                return True
+            pattern = os.path.normpath(pattern).replace('\\', '/')
+            for candidate in path_candidates:
+                candidate_path = Path(candidate)
+                candidate_paths = {candidate_path.as_posix()}
+                candidate_paths.update(
+                    parent.as_posix()
+                    for parent in candidate_path.parents
+                    if str(parent) not in ('.', '..')
+                )
+                if any(
+                    fnmatch(os.path.normpath(value).replace(os.sep, '/'), pattern)
+                    for value in candidate_paths
+                ):
+                    return True
 
         return False
 
+    def find_epub_media_files(media_dir, recursive):
+        media_root = os.path.abspath(media_dir) if media_dir else os.getcwd()
+        if not os.path.isdir(media_root):
+            log_error(f'Папка медиа не найдена: {media_root}', critical=False)
+            return [], media_root
+
+        media_paths = []
+        if recursive and not args.no_recursive:
+            for root, dirs, files in os.walk(media_root):
+                dirs[:] = [
+                    directory_name
+                    for directory_name in dirs
+                    if not should_exclude(Path(root) / directory_name, root_path=media_root)
+                ]
+                for file_name in files:
+                    media_path = Path(root) / file_name
+                    if (
+                        media_path.suffix.lower() in SUPPORTED_EPUB_MEDIA_TYPES
+                        and not should_exclude(media_path, root_path=media_root)
+                    ):
+                        media_paths.append(media_path)
+        else:
+            for file_name in os.listdir(media_root):
+                media_path = Path(media_root) / file_name
+                if (
+                    media_path.is_file()
+                    and media_path.suffix.lower() in SUPPORTED_EPUB_MEDIA_TYPES
+                    and not should_exclude(media_path, root_path=media_root)
+                ):
+                    media_paths.append(media_path)
+
+        media_paths.sort(key=lambda media_path: media_path.relative_to(media_root).as_posix().casefold())
+        return media_paths, media_root
+
+    def attach_epub_media(output_path, media_dir, recursive):
+        media_paths, media_root = find_epub_media_files(media_dir, recursive)
+        try:
+            if media_paths:
+                media_count = add_media_files_to_epub(
+                    output_path,
+                    media_paths,
+                    media_root,
+                    identifier=args.identifier,
+                    layout_method=args.layout_method,
+                    author=args.author,
+                    publisher=args.publisher,
+                    rights=args.rights,
+                )
+            else:
+                update_epub_metadata(
+                    output_path,
+                    identifier=args.identifier,
+                    layout_method=args.layout_method,
+                    author=args.author,
+                    publisher=args.publisher,
+                    rights=args.rights,
+                )
+                media_count = 0
+        except (OSError, ValueError, ET.ParseError, zipfile.BadZipFile) as e:
+            log_error(f'Не удалось обновить метаданные EPUB или добавить аудио/видео: {e}')
+            return False
+
+        if media_count:
+            log_ok(f'В EPUB добавлено медиафайлов: {media_count}')
+        return True
+
+    def allow_output_write(output_path, result_info):
+        if not os.path.lexists(output_path):
+            return True
+        if args.force:
+            return True
+
+        if args.ask_overwrite:
+            if not sys.stdin.isatty():
+                log_error(
+                    f'Нельзя запросить перезапись {output_path}: ввод не является интерактивным. '
+                    'Используйте --force или запустите команду в терминале.'
+                )
+                result_info['skipped'] = True
+                return False
+
+            prompt = f'Файл уже существует: {output_path}. Перезаписать? [y/N] '
+            print(
+                prompt,
+                end='',
+                file=sys.stderr,
+                flush=True,
+            )
+            write_file_log(prompt)
+            answer = input().strip().lower()
+            if answer in ('y', 'yes', 'д', 'да'):
+                return True
+
+        log(f'Существующий файл пропущен: {output_path}')
+        result_info['skipped'] = True
+        return False
+
+    def prepare_output_parent(output_path):
+        if LOG_FILE_PATH and os.path.abspath(output_path) == LOG_FILE_PATH:
+            log_error(f'Путь журнала совпадает с выходным файлом: {output_path}')
+            return False
+        try:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log_error(f'Не удалось создать папку для результата {output_path}: {e}')
+            return False
+        return True
+
+    def path_identity_keys(path):
+        resolved_path = os.path.normcase(os.path.realpath(path))
+        identities = {('path', resolved_path)}
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            pass
+        else:
+            identities.add(('inode', stat_result.st_dev, stat_result.st_ino))
+        return identities
+
+    def paths_refer_to_same_file(first_path, second_path):
+        return not path_identity_keys(first_path).isdisjoint(
+            path_identity_keys(second_path)
+        )
+
     # Обработка одного файла
-    def process_single_file(input_path, explicit_cover=None, explicit_output=None, explicit_title=None, explicit_author=None, explicit_lang='', media_dir='.', media_recursive=True):
-        """Обрабатывает один ODT файл. Возвращает True при успехе."""
+    def process_single_file(input_path, explicit_cover=None, explicit_output=None, explicit_title=None, explicit_author=None, explicit_lang='', media_dir='.', media_recursive=True, result_info=None):
+        """Обрабатывает один входной файл. Возвращает True при успехе."""
+        if result_info is None:
+            result_info = {}
+        result_info['output_path'] = None
+        result_info['skipped'] = False
+
         input_path = os.path.abspath(input_path)
 
         if not os.path.exists(input_path):
             log_error(f'Файл не найден: {input_path}')
             return False
 
-        if not input_path.lower().endswith('.odt'):
-            log_error(f'Файл должен иметь расширение .odt: {input_path}')
+        input_extension = Path(input_path).suffix.lower()
+        if input_extension not in convertible_input_extensions:
+            extensions = ', '.join(sorted(convertible_input_extensions))
+            log_error(f'Формат входного файла не поддерживается (ожидается {extensions}): {input_path}')
             return False
 
-        if args.format == 'md':
-            output_path = os.path.abspath(explicit_output) if explicit_output else str(Path(input_path).with_suffix('.md'))
-            log_step('1/1', 'Конвертация ODT в Markdown с Pandoc...')
-            try:
-                subprocess.run(
-                    ['pandoc', '--from=odt', '--to=markdown', input_path, '--output', output_path],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    universal_newlines=True,
-                )
-            except FileNotFoundError:
-                log_error('Pandoc не найден. Установите Pandoc и добавьте его в PATH.')
+        if input_extension == f'.{args.format}':
+            result_info['output_path'] = input_path
+            result_info['skipped'] = True
+            log(f'Форматы источника и результата совпадают; файл пропущен: {input_path}')
+            return False
+
+        is_markdown = input_extension == '.md'
+        is_plain_text = input_extension == '.txt'
+        is_pdf = input_extension == '.pdf'
+        is_text_source = is_markdown or is_plain_text
+        if args.format in ('md', 'pdf', 'txt') or is_text_source or is_pdf:
+            pandoc_formats = {'md': 'markdown', 'pdf': 'pdf', 'txt': 'plain', 'epub': 'epub'}
+            format_names = {'md': 'Markdown', 'pdf': 'PDF', 'txt': 'TXT', 'epub': 'EPUB'}
+            output_path = os.path.abspath(explicit_output) if explicit_output else str(Path(input_path).with_suffix(f'.{args.format}'))
+            if paths_refer_to_same_file(input_path, output_path):
+                log_error(f'Путь результата совпадает с исходным файлом: {input_path}')
+                result_info['output_path'] = output_path
                 return False
-            except subprocess.CalledProcessError as e:
-                error = e.stderr.strip() or str(e)
-                log_error(f'Ошибка Pandoc: {error}')
+            if not prepare_output_parent(output_path):
                 return False
-            except OSError as e:
-                log_error(f'Ошибка запуска Pandoc: {e}')
+            if result_info is not None:
+                result_info['output_path'] = output_path
+            if not allow_output_write(output_path, result_info):
+                return False
+            source_format = 'markdown' if is_text_source or is_pdf else 'odt'
+            source_name = 'PDF' if is_pdf else 'Markdown' if is_markdown else 'TXT' if is_plain_text else 'ODT'
+            if not is_pdf:
+                log_step('1/1', f'Конвертация {source_name} в {format_names[args.format]} с Pandoc...')
+            pandoc_command = [
+                'pandoc',
+                f'--from={source_format}',
+                f'--to={pandoc_formats[args.format]}',
+            ]
+            if is_pdf:
+                pandoc_command.extend(['-M', f'title={explicit_title or Path(input_path).stem}'])
+                pandoc_command.extend(['-M', f'lang={explicit_lang or "ru"}'])
+                if explicit_author:
+                    pandoc_command.extend(['-M', f'author={explicit_author}'])
+            elif is_text_source:
+                if explicit_title:
+                    pandoc_command.extend(['-M', f'title={explicit_title}'])
+                if explicit_author:
+                    pandoc_command.extend(['-M', f'author={explicit_author}'])
+                if explicit_lang:
+                    pandoc_command.extend(['-M', f'lang={explicit_lang}'])
+            if (is_text_source or is_pdf) and args.format == 'epub' and explicit_cover:
+                cover_path = os.path.abspath(explicit_cover)
+                if not os.path.isfile(cover_path):
+                    log_error(f'Файл обложки не найден: {cover_path}')
+                    return False
+                pandoc_command.append(f'--epub-cover-image={cover_path}')
+            if args.format == 'epub':
+                if args.css:
+                    pandoc_command.extend(['--css', args.css])
+                if args.toc:
+                    pandoc_command.append('--toc')
+
+            def run_pandoc(command):
+                try:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True,
+                    )
+                except FileNotFoundError:
+                    log_error('Pandoc не найден. Установите Pandoc и добавьте его в PATH для конвертации.')
+                    return False
+                except subprocess.CalledProcessError as e:
+                    error = e.stderr.strip() or str(e)
+                    log_error(f'Ошибка Pandoc: {error}')
+                    return False
+                except OSError as e:
+                    log_error(f'Ошибка запуска Pandoc: {e}')
+                    return False
+                return True
+
+            if is_pdf:
+                with tempfile.TemporaryDirectory(prefix='odt2epub-') as temp_dir:
+                    extracted_text_path = Path(temp_dir) / 'extracted.txt'
+                    log_step('1/2', 'Извлечение текста из PDF с помощью pdftotext...')
+                    try:
+                        subprocess.run(
+                            ['pdftotext', '-enc', 'UTF-8', '-nopgbrk', input_path, str(extracted_text_path)],
+                            check=True,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True,
+                        )
+                    except FileNotFoundError:
+                        log_error('pdftotext не найден. Установите Poppler и добавьте его в PATH для конвертации PDF.')
+                        return False
+                    except subprocess.CalledProcessError as e:
+                        error = e.stderr.strip() or str(e)
+                        log_error(f'Ошибка извлечения текста из PDF: {error}')
+                        return False
+                    except OSError as e:
+                        log_error(f'Ошибка запуска pdftotext: {e}')
+                        return False
+
+                    try:
+                        with extracted_text_path.open(encoding='utf-8') as extracted_text:
+                            has_extractable_text = any(line.strip() for line in extracted_text)
+                    except (OSError, UnicodeError) as e:
+                        log_error(f'Не удалось прочитать извлечённый текст PDF: {e}')
+                        return False
+
+                    if has_extractable_text:
+                        pandoc_input_path = extracted_text_path
+                        log_step('2/2', 'Создание EPUB из текста PDF с помощью Pandoc...')
+                    else:
+                        log('Текстовый слой не найден; страницы PDF будут добавлены в EPUB как изображения.')
+                        log_step('2/3', 'Рендеринг страниц PDF в изображения с помощью pdftoppm...')
+                        image_prefix = Path(temp_dir) / 'page'
+                        try:
+                            subprocess.run(
+                                ['pdftoppm', '-png', '-r', '150', input_path, str(image_prefix)],
+                                check=True,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                universal_newlines=True,
+                            )
+                        except FileNotFoundError:
+                            log_error('pdftoppm не найден. Установите Poppler и добавьте pdftoppm в PATH для обработки сканированных PDF.')
+                            return False
+                        except subprocess.CalledProcessError as e:
+                            error = e.stderr.strip() or str(e)
+                            log_error(f'Ошибка рендеринга страниц PDF: {error}')
+                            return False
+                        except OSError as e:
+                            log_error(f'Ошибка запуска pdftoppm: {e}')
+                            return False
+
+                        page_images = sorted(
+                            Path(temp_dir).glob('page-*.png'),
+                            key=lambda page: int(page.stem.rsplit('-', 1)[1]),
+                        )
+                        if not page_images:
+                            log_error('pdftoppm не создал изображения страниц PDF.')
+                            return False
+
+                        pages_markdown = '\n\n'.join(
+                            f'![Страница {index}]({page.name})'
+                            for index, page in enumerate(page_images, start=1)
+                        ) + '\n'
+                        pandoc_input_path = Path(temp_dir) / 'pages.md'
+                        try:
+                            pandoc_input_path.write_text(pages_markdown, encoding='utf-8')
+                        except OSError as e:
+                            log_error(f'Не удалось создать список страниц PDF: {e}')
+                            return False
+
+                        pandoc_command.append(f'--resource-path={temp_dir}')
+                        log_step('3/3', 'Создание EPUB из изображений страниц с помощью Pandoc...')
+
+                    pandoc_command.extend([str(pandoc_input_path), '--output', output_path])
+                    if not run_pandoc(pandoc_command):
+                        return False
+            else:
+                pandoc_command.extend([input_path, '--output', output_path])
+                if not run_pandoc(pandoc_command):
+                    return False
+
+            if args.format == 'epub' and not attach_epub_media(
+                output_path,
+                media_dir,
+                media_recursive,
+            ):
                 return False
 
-            log_ok(f'Markdown сохранён: {output_path}')
+            log_ok(f'{format_names[args.format]} сохранён: {output_path}')
             return True
 
         # Проверяем обложку
@@ -1129,7 +2188,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             found_candidate = None
             search_root = os.path.abspath(media_dir) if media_dir else '.'
             if not os.path.isdir(search_root):
-                log_error(f'Папка медиа не найдена: {search_root}')
+                log_error(f'Папка медиа не найдена: {search_root}', critical=False)
             elif media_recursive and not args.no_recursive:
                 # Рекурсивный обход: сначала более мелкие уровни глубины
                 matches = []
@@ -1151,7 +2210,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     cover_mime_type = get_image_mime_type(found_candidate.suffix.lower())
                     log_ok(f'Обложка найдена автоматически: {found_candidate} ({cover_mime_type})')
                 except Exception as e:
-                    log_error(f'Ошибка чтения найденной обложки {found_candidate.name}: {e}')
+                    log_error(f'Ошибка чтения найденной обложки {found_candidate.name}: {e}', critical=False)
                     cover_buffer = None
             else:
                 log('ℹ️  Обложка не указана и не найдена в папке медиа (по умолчанию: текущая папка с подпапками)')
@@ -1160,14 +2219,24 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         if explicit_output:
             output_path = os.path.abspath(explicit_output)
         else:
-            output_path = os.path.abspath(input_path.replace('.odt', '.epub').replace('.ODT', '.epub'))
-
-        # Добавляем суффикс с датой и временем создания перед расширением
-        timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
-        output_stem = Path(output_path).stem
-        output_ext = Path(output_path).suffix
-        output_dir = Path(output_path).parent
-        output_path = str(output_dir / f'{output_stem}_({timestamp}){output_ext}')
+            output_path = str(Path(input_path).with_suffix('.epub'))
+            if not args.no_timestamp:
+                timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
+                output_path = str(
+                    Path(output_path).with_name(
+                        f'{Path(output_path).stem}_({timestamp}){Path(output_path).suffix}'
+                    )
+                )
+        if paths_refer_to_same_file(input_path, output_path):
+            log_error(f'Путь результата совпадает с исходным файлом: {input_path}')
+            result_info['output_path'] = output_path
+            return False
+        if not prepare_output_parent(output_path):
+            return False
+        if result_info is not None:
+            result_info['output_path'] = output_path
+        if not allow_output_write(output_path, result_info):
+            return False
 
         # Шаг 1: Читаем ODT
         log_step('1/5', 'Чтение ODT файла...')
@@ -1188,7 +2257,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         # Извлекаем метаданные
         meta = extract_meta(odt_content.meta_xml)
         title = explicit_title or Path(input_path).stem
-        author = explicit_author or meta['author'] or 'Unknown'
+        author = explicit_author or meta['author'] or DEFAULT_AUTHOR
         language = explicit_lang or meta['language'] or 'ru'
         log_ok(f'Метаданные: "{title}" — {author}')
 
@@ -1196,6 +2265,8 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         log_step('3/5', 'Конвертация содержимого в XHTML...')
         converter = XHTMLConverter(styles_map, auto_styles_map, odt_content.images, split_method=args.split_method)
         xhtml, css, image_files, chapters = converter.convert(odt_content.content_xml)
+        if custom_css:
+            css = f'{css.rstrip()}\n\n{custom_css}'
         log_ok(f'XHTML сгенерирован ({len(xhtml)} символов, {len(image_files)} изображений)')
         log_ok(f'Разбиение: метод "{args.split_method}", разделов: {len(chapters)}')
 
@@ -1206,10 +2277,17 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         epub_buffer = generate_epub(xhtml, css, image_files, {
             'title': title,
             'author': author,
+            'publisher': args.publisher if args.publisher is not None else (
+                meta['publisher'] or DEFAULT_PUBLISHER
+            ),
+            'rights': args.rights if args.rights is not None else (
+                meta['rights'] or DEFAULT_RIGHTS
+            ),
             'date': generation_date,
             'language': language,
             'cover_image': cover_buffer,
             'cover_mime_type': cover_mime_type,
+            'interactive_toc': args.toc,
         }, chapters=chapters)
         epub_size_kb = len(epub_buffer) / 1024
         log_ok(f'EPUB собран ({epub_size_kb:.1f} КБ)')
@@ -1224,21 +2302,137 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             log_error(f'Ошибка записи файла: {e}')
             return False
 
+        if not attach_epub_media(output_path, media_dir, media_recursive):
+            return False
+
         # Итог
-        print('\n  ┌──────────────────────────────────────────┐')
-        print(f'  │  📖 {title}')
-        print(f'  │  ✍️  {author}')
-        print(f'  │  🌐 {language.upper()}')
-        print(f'  │  📦 {epub_size_kb:.1f} КБ')
-        print(f'  │  📁 {os.path.basename(output_path)}')
-        print('  └──────────────────────────────────────────┘')
-        print('')
+        verbose_print('\n  ┌──────────────────────────────────────────┐')
+        verbose_print(f'  │  📖 {title}')
+        verbose_print(f'  │  ✍️  {author}')
+        verbose_print(f'  │  🌐 {language.upper()}')
+        verbose_print(f'  │  📦 {epub_size_kb:.1f} КБ')
+        verbose_print(f'  │  📁 {os.path.basename(output_path)}')
+        verbose_print('  └──────────────────────────────────────────┘')
+        verbose_print('')
         log_ok('Конвертация завершена!\n')
+        return True
+
+    def print_file_result(input_path, result_info, success):
+        output_path = result_info.get('output_path')
+        output_name = Path(output_path).name if output_path else '—'
+        if result_info.get('skipped'):
+            result = 'ПРОПУЩЕНО'
+        else:
+            result = 'УСПЕШНО' if success else 'ОШИБКА'
+        result_line = f'{Path(input_path).name} — {output_name} — {result}'
+        if OUTPUT_MODE == 'summary':
+            print(result_line)
+        write_file_log(result_line)
+
+    def process_image_folder(directory_path, image_paths, explicit_output=None, result_info=None,
+                             media_dir='.', media_recursive=True):
+        """Создаёт EPUB, в котором каждое изображение является отдельной страницей."""
+        if result_info is None:
+            result_info = {}
+        result_info['output_path'] = None
+        result_info['skipped'] = False
+
+        directory = Path(directory_path)
+        output_path = (
+            os.path.abspath(explicit_output)
+            if explicit_output
+            else str(directory.parent / f'{directory.name or "Images"}.epub')
+        )
+        result_info['output_path'] = output_path
+        if any(paths_refer_to_same_file(output_path, image_path) for image_path in image_paths):
+            log_error(f'Путь результата совпадает с исходным изображением: {output_path}')
+            return False
+        if not prepare_output_parent(output_path):
+            return False
+        if not allow_output_write(output_path, result_info):
+            return False
+
+        image_paths = sorted(
+            image_paths,
+            key=lambda image_path: [
+                int(part) if part.isdigit() else part.casefold()
+                for part in re.split(r'(\d+)', Path(image_path).relative_to(directory).as_posix())
+            ],
+        )
+        markdown = '\n\n'.join(
+            (
+                f'## Страница {index}\n\n'
+                if args.toc
+                else ''
+            )
+            + f'![Страница {index}](<{Path(image_path).relative_to(directory).as_posix()}>)'
+            for index, image_path in enumerate(image_paths, start=1)
+        ) + '\n'
+
+        try:
+            with tempfile.TemporaryDirectory(prefix='odt2epub-images-') as temp_dir:
+                markdown_path = Path(temp_dir) / 'images.md'
+                markdown_path.write_text(markdown, encoding='utf-8')
+                title = args.title or directory.name or 'Изображения'
+                pandoc_command = [
+                    'pandoc',
+                    '--from=markdown',
+                    '--to=epub',
+                    '-M',
+                    f'title={title}',
+                    '-M',
+                    f'lang={args.lang or "ru"}',
+                ]
+                pandoc_command.extend(['-M', f'author={args.author or DEFAULT_AUTHOR}'])
+                if args.css:
+                    pandoc_command.extend(['--css', args.css])
+                if args.toc:
+                    pandoc_command.append('--toc')
+                if args.cover:
+                    cover_path = os.path.abspath(args.cover)
+                    if not os.path.isfile(cover_path):
+                        log_error(f'Файл обложки не найден: {cover_path}')
+                        return False
+                    pandoc_command.append(f'--epub-cover-image={cover_path}')
+                pandoc_command.extend([
+                    f'--resource-path={directory}',
+                    str(markdown_path),
+                    '--output',
+                    output_path,
+                ])
+
+                log_step('1/1', f'Создание EPUB из {len(image_paths)} изображений...')
+                try:
+                    subprocess.run(
+                        pandoc_command,
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True,
+                    )
+                except FileNotFoundError:
+                    log_error('Pandoc не найден. Установите Pandoc и добавьте его в PATH для создания EPUB из изображений.')
+                    return False
+                except subprocess.CalledProcessError as e:
+                    error = e.stderr.strip() or str(e)
+                    log_error(f'Ошибка Pandoc: {error}')
+                    return False
+                except OSError as e:
+                    log_error(f'Ошибка запуска Pandoc: {e}')
+                    return False
+        except OSError as e:
+            log_error(f'Ошибка подготовки изображений для EPUB: {e}')
+            return False
+
+        if not attach_epub_media(output_path, media_dir, media_recursive):
+            return False
+
+        log_ok(f'EPUB сохранён: {output_path}')
         return True
 
     # Обработка директории
     def process_directory(directory_path):
-        """Обрабатывает все ODT файлы в директории"""
+        """Обрабатывает все поддерживаемые входные файлы в директории"""
         directory_path = os.path.abspath(directory_path)
 
         if not os.path.exists(directory_path):
@@ -1250,34 +2444,67 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             return []
 
         # Собираем все ODT файлы
-        all_odt_files = []
+        all_input_files = []
 
         if args.no_recursive:
             # Нерекурсивный режим: только файлы в указанной директории
             for file_name in os.listdir(directory_path):
                 file_path = Path(directory_path) / file_name
-                if file_path.is_file() and file_name.lower().endswith('.odt'):
-                    if not should_exclude(file_path):
-                        all_odt_files.append(file_path)
+                if file_path.is_file() and file_path.suffix.lower() in input_extensions:
+                    if not should_exclude(file_path, root_path=directory_path):
+                        all_input_files.append(file_path)
         else:
             # Рекурсивный режим: обход всех поддиректорий
             for root, dirs, files in os.walk(directory_path):
                 # Фильтруем директории по исключениям
-                dirs[:] = [d for d in dirs if not should_exclude(Path(root) / d)]
+                dirs[:] = [
+                    d for d in dirs
+                    if not should_exclude(Path(root) / d, root_path=directory_path)
+                ]
 
                 for file_name in files:
-                    if file_name.lower().endswith('.odt'):
-                        file_path = Path(root) / file_name
-                        if not should_exclude(file_path):
-                            all_odt_files.append(file_path)
+                    file_path = Path(root) / file_name
+                    if file_path.suffix.lower() in input_extensions:
+                        if not should_exclude(file_path, root_path=directory_path):
+                            all_input_files.append(file_path)
 
-        return all_odt_files
+        return all_input_files
+
+    def find_image_files(directory_path):
+        """Находит изображения в папке, соблюдая настройки рекурсии и исключения."""
+        image_paths = []
+        if args.no_recursive:
+            for file_name in os.listdir(directory_path):
+                file_path = Path(directory_path) / file_name
+                if (
+                    file_path.is_file()
+                    and file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                    and not should_exclude(file_path, root_path=directory_path)
+                ):
+                    image_paths.append(file_path)
+            return image_paths
+
+        for root, dirs, files in os.walk(directory_path):
+            dirs[:] = [
+                directory_name
+                for directory_name in dirs
+                if not should_exclude(Path(root) / directory_name, root_path=directory_path)
+            ]
+            for file_name in files:
+                file_path = Path(root) / file_name
+                if (
+                    file_path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
+                    and not should_exclude(file_path, root_path=directory_path)
+                ):
+                    image_paths.append(file_path)
+        return image_paths
 
     # Определяем пути для обработки
     paths_to_process = args.paths if args.paths else ['.']
 
     # Собираем все файлы для обработки
     all_files = []
+    image_books = []
 
     for path in paths_to_process:
         path = os.path.abspath(path)
@@ -1288,20 +2515,28 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
 
         if os.path.isfile(path):
             # Это файл
-            if path.lower().endswith('.odt'):
+            if Path(path).suffix.lower() in convertible_input_extensions:
                 if should_exclude(Path(path)):
                     log(f'⏭️  Файл пропущен (исключение): {os.path.basename(path)}')
                 else:
                     all_files.append(path)
             else:
-                log_error(f'Файл не является ODT: {path}')
+                extensions = ', '.join(sorted(input_extensions))
+                log_error(f'Формат входного файла не поддерживается (ожидается {extensions}): {path}')
         elif os.path.isdir(path):
             # Это директория
-            files = process_directory(path)
-            all_files.extend(files)
+            if should_exclude(Path(path)):
+                log(f'⏭️  Директория пропущена (исключение): {os.path.basename(path)}')
+            else:
+                files = process_directory(path)
+                all_files.extend(files)
+                if 'images' in selected_source_formats and not files:
+                    image_paths = find_image_files(path)
+                    if image_paths:
+                        image_books.append((path, image_paths))
 
-    if not all_files:
-        log('ℹ️  ODT файлы не найдены')
+    if not all_files and not image_books:
+        log('ℹ️  Файлы для конвертации не найдены')
         sys.exit(0)
 
     # Показываем список исключений
@@ -1309,57 +2544,231 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         log(f'🚫 Исключения ({len(exclude_patterns)}):')
         for pattern in exclude_patterns:
             log(f'   • {pattern}')
-        print()
+        verbose_print()
 
-    log(f'📂 Найдено ODT файлов: {len(all_files)}')
+    total_inputs = len(all_files) + len(image_books)
+    log(f'📂 Найдено источников для конвертации: {total_inputs}')
+
+    def output_for_source(source_path, image_folder=False):
+        source_path = Path(source_path)
+        source_directory = source_path if image_folder else source_path.parent
+        output_path = None
+        if args.output:
+            requested_output = Path(args.output)
+            if not requested_output.is_absolute():
+                requested_output = source_directory / requested_output
+            requested_output = Path(os.path.abspath(requested_output))
+
+            is_output_directory = requested_output.is_dir() or (
+                not requested_output.exists()
+                and (
+                    not Path(args.output).suffix
+                    or args.output.endswith(('/', '\\'))
+                )
+            )
+            if is_output_directory:
+                source_name = source_path.name if image_folder else source_path.stem
+                if not source_name:
+                    source_name = 'Images'
+                output_extension = '.epub' if image_folder else f'.{args.format}'
+                output_path = requested_output / f'{source_name}{output_extension}'
+            elif total_inputs == 1:
+                output_path = requested_output
+
+        if output_path is None:
+            if image_folder:
+                output_path = source_directory.parent / f'{source_directory.name or "Images"}.epub'
+            else:
+                output_path = source_path.with_suffix(f'.{args.format}')
+
+        if (
+            not image_folder
+            and args.format == 'epub'
+            and source_path.suffix.lower() == '.odt'
+            and not args.no_timestamp
+        ):
+            timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
+            output_path = output_path.with_name(
+                f'{output_path.stem}_({timestamp}){output_path.suffix}'
+            )
+        return os.path.abspath(output_path)
+
+    planned_output_paths = {}
+    source_paths = [
+        os.path.abspath(str(source_path))
+        for source_path in all_files
+    ]
+    source_paths.extend(
+        os.path.abspath(str(image_path))
+        for _, images in image_books
+        for image_path in images
+    )
+    output_claims = []
+    for source_path in all_files:
+        source_path = os.path.abspath(str(source_path))
+        if Path(source_path).suffix.lower() == f'.{args.format}':
+            continue
+        output_path = output_for_source(source_path)
+        planned_output_paths[('file', source_path)] = output_path
+        output_claims.append((source_path, output_path))
+    for image_directory, _image_paths in image_books:
+        source_path = os.path.abspath(str(image_directory))
+        output_path = output_for_source(source_path, image_folder=True)
+        planned_output_paths[('images', source_path)] = output_path
+        output_claims.append((source_path, output_path))
+
+    output_conflicts = []
+    source_identities = {}
+    for source_path in source_paths:
+        for identity in path_identity_keys(source_path):
+            source_identities.setdefault(identity, source_path)
+
+    output_identities = {}
+    for source_path, output_path in output_claims:
+        identities = path_identity_keys(output_path)
+        matching_source = next(
+            (source_identities[identity] for identity in identities if identity in source_identities),
+            None,
+        )
+        if matching_source is not None:
+            output_conflicts.append(
+                f'Результат {output_path} совпадает с исходным файлом {matching_source}'
+            )
+        conflicting_source = next(
+            (output_identities[identity] for identity in identities if identity in output_identities),
+            None,
+        )
+        if conflicting_source is not None:
+            output_conflicts.append(
+                f'Источники {conflicting_source} и {source_path} имеют общий путь результата '
+                f'{output_path}'
+            )
+        else:
+            for identity in identities:
+                output_identities[identity] = source_path
+
+    if output_conflicts:
+        for conflict in output_conflicts:
+            log_error(conflict)
+        sys.exit(1)
 
     # Если только один файл и указан -o, используем его
-    if len(all_files) == 1 and args.output:
-        process_single_file(
-            all_files[0],
-            explicit_cover=args.cover,
-            explicit_output=args.output,
-            explicit_title=args.title,
-            explicit_author=args.author,
-            explicit_lang=args.lang,
-            media_dir=args.media_dir,
-            media_recursive=not args.no_recursive
-        )
+    if total_inputs == 1 and args.output and all_files:
+        result_info = {}
+        try:
+            success = process_single_file(
+                all_files[0],
+                explicit_cover=args.cover,
+                explicit_output=planned_output_paths.get(
+                    ('file', os.path.abspath(str(all_files[0])))
+                ),
+                explicit_title=args.title,
+                explicit_author=args.author,
+                explicit_lang=args.lang,
+                media_dir=args.media_dir,
+                media_recursive=not args.no_recursive,
+                result_info=result_info
+            )
+        except Exception as e:
+            log_error(f'Ошибка обработки: {e}')
+            success = False
+        print_file_result(all_files[0], result_info, success)
+    elif total_inputs == 1 and args.output:
+        image_directory, image_paths = image_books[0]
+        result_info = {}
+        try:
+            success = process_image_folder(
+                image_directory,
+                image_paths,
+                explicit_output=planned_output_paths[
+                    ('images', os.path.abspath(str(image_directory)))
+                ],
+                result_info=result_info,
+                media_dir=args.media_dir,
+                media_recursive=not args.no_recursive,
+            )
+        except Exception as e:
+            log_error(f'Ошибка обработки: {e}')
+            success = False
+        print_file_result(image_directory, result_info, success)
     else:
         # Обрабатываем каждый файл
         success_count = 0
         fail_count = 0
+        skipped_count = 0
 
         for i, file_path in enumerate(all_files, 1):
-            print(f'\n  {"─" * 50}')
-            log(f'📄 [{i}/{len(all_files)}] {Path(file_path).name}')
-            print(f'  {"─" * 50}')
+            verbose_print(f'\n  {"─" * 50}')
+            log(f'📄 [{i}/{total_inputs}] {Path(file_path).name}')
+            verbose_print(f'  {"─" * 50}')
+            result_info = {}
 
             try:
-                if process_single_file(
+                success = process_single_file(
                     file_path,
                     explicit_cover=args.cover,
-                    explicit_output=None,  # В пакетном режиме всегда автоимя
+                    explicit_output=planned_output_paths.get(
+                        ('file', os.path.abspath(str(file_path)))
+                    ),
                     explicit_title=args.title,
                     explicit_author=args.author,
                     explicit_lang=args.lang,
                     media_dir=args.media_dir,
-                    media_recursive=not args.no_recursive
-                ):
+                    media_recursive=not args.no_recursive,
+                    result_info=result_info
+                )
+                if success:
                     success_count += 1
+                elif result_info.get('skipped'):
+                    skipped_count += 1
                 else:
                     fail_count += 1
             except Exception as e:
                 log_error(f'Ошибка обработки: {e}')
                 fail_count += 1
+                success = False
+
+            print_file_result(file_path, result_info, success)
+
+        for i, (image_directory, image_paths) in enumerate(image_books, len(all_files) + 1):
+            verbose_print(f'\n  {"─" * 50}')
+            log(f'🖼️  [{i}/{total_inputs}] {Path(image_directory).name or image_directory}')
+            verbose_print(f'  {"─" * 50}')
+            result_info = {}
+
+            try:
+                success = process_image_folder(
+                    image_directory,
+                    image_paths,
+                    explicit_output=planned_output_paths[
+                        ('images', os.path.abspath(str(image_directory)))
+                    ],
+                    result_info=result_info,
+                    media_dir=args.media_dir,
+                    media_recursive=not args.no_recursive,
+                )
+                if success:
+                    success_count += 1
+                elif result_info.get('skipped'):
+                    skipped_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                log_error(f'Ошибка обработки: {e}')
+                fail_count += 1
+                success = False
+
+            print_file_result(image_directory, result_info, success)
 
         # Итоговая статистика
-        print(f'\n  {"═" * 50}')
-        print(f'  📊 Итого: {len(all_files)} файлов')
-        print(f'  ✅ Успешно: {success_count}')
+        verbose_print(f'\n  {"═" * 50}')
+        verbose_print(f'  📊 Итого: {total_inputs} источников')
+        verbose_print(f'  ✅ Успешно: {success_count}')
+        if skipped_count > 0:
+            verbose_print(f'  ⏭️  Пропущено: {skipped_count}')
         if fail_count > 0:
-            print(f'  ❌ Ошибок: {fail_count}')
-        print(f'  {"═" * 50}\n')
+            verbose_print(f'  ❌ Ошибок: {fail_count}')
+        verbose_print(f'  {"═" * 50}\n')
 
 
 if __name__ == '__main__':
