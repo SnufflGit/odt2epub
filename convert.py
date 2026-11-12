@@ -1614,8 +1614,9 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     )
 
     parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
-    parser.add_argument('--format', choices=('epub', 'md', 'pdf', 'txt'), default='epub',
-                        help='Формат результата: epub (по умолчанию), md, pdf или txt; совпадающие входной и выходной форматы пропускаются')
+    output_format_choices = ('epub', 'md', 'pdf', 'txt')
+    parser.add_argument('--format', choices=output_format_choices, default=None,
+                        help='Формат результата: epub, md, pdf или txt; если не указан, определяется по расширению -o (иначе epub)')
     parser.add_argument(
         '--input-formats',
         action='append',
@@ -1683,6 +1684,30 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                                'heading — по заголовкам, none — без разбиения (единая глава)')
 
     args = parser.parse_args()
+    if args.format is None:
+        output_path = Path(args.output) if args.output else None
+        output_is_directory = bool(
+            output_path
+            and (
+                output_path.is_dir()
+                or args.output.endswith(('/', '\\'))
+            )
+        )
+        if output_path and not output_is_directory and not output_path.is_absolute():
+            input_paths = args.paths or ['.']
+            output_is_directory = any(
+                (Path(input_path) / output_path).is_dir()
+                if Path(input_path).is_dir()
+                else (Path(input_path).parent / output_path).is_dir()
+                for input_path in input_paths
+                if Path(input_path).is_dir() or Path(input_path).is_file()
+            )
+        output_suffix = (
+            output_path.suffix.lower().lstrip('.')
+            if output_path and not output_is_directory
+            else ''
+        )
+        args.format = output_suffix if output_suffix in output_format_choices else 'epub'
     args.media_dir_explicit = args.media_dir is not None
     OUTPUT_MODE = args.mode
 
@@ -2651,6 +2676,19 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         for conflict in output_conflicts:
             log_error(conflict)
         sys.exit(1)
+
+    for _source_path, output_path in output_claims:
+        output_suffix = Path(output_path).suffix.lower().lstrip('.')
+        if output_suffix and output_suffix not in output_format_choices:
+            parser.error(
+                f'расширение выходного файла должно соответствовать одному '
+                f'из форматов: {", ".join(output_format_choices)}'
+            )
+        if output_suffix and output_suffix != args.format:
+            parser.error(
+                f'расширение выходного файла .{output_suffix} не соответствует '
+                f'формату {args.format}'
+            )
 
     # Если только один файл и указан -o, используем его
     if total_inputs == 1 and args.output and all_files:

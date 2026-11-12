@@ -511,6 +511,112 @@ class PandocFormatTests(unittest.TestCase):
                 self.assertEqual(output_path, self.directory / f'Книга.{output_format}')
                 self.assertTrue(output_path.is_file())
 
+    def test_output_extension_selects_format_when_format_is_omitted(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Заголовок\n\nТекст книги.\n', encoding='utf-8')
+        output_path = self.directory / '1.pdf'
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(b'converted')
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--cover',
+            'Обложка.jpg',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--to=pdf', commands[0])
+        self.assertNotIn('--epub-cover-image=Обложка.jpg', commands[0])
+        self.assertEqual(
+            Path(commands[0][commands[0].index('--output') + 1]),
+            output_path,
+        )
+        self.assertTrue(output_path.is_file())
+
+    def test_output_rejects_unsupported_extension_before_overwriting_cover(self):
+        source_path = self.directory / 'Книга.odt'
+        source_path.write_bytes(b'')
+        cover_path = self.directory / 'Обложка.jpg'
+        original_cover = b'original cover'
+        cover_path.write_bytes(original_cover)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(source_path),
+            '--cover',
+            str(cover_path),
+            '--output',
+            str(cover_path),
+            '--force',
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=AssertionError('should not convert')):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertIn('расширение выходного файла', stderr.getvalue())
+        self.assertEqual(cover_path.read_bytes(), original_cover)
+
+    def test_output_rejects_extension_that_conflicts_with_explicit_format(self):
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(self.input_path),
+            '--format',
+            'epub',
+            '--output',
+            str(self.directory / 'Книга.pdf'),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=AssertionError('should not convert')):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 2)
+        self.assertIn('не соответствует формату epub', stderr.getvalue())
+
+    def test_dotted_output_directory_is_not_treated_as_an_extension(self):
+        output_directory = self.directory / 'converted.pdf'
+        output_directory.mkdir()
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Заголовок\n', encoding='utf-8')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--output',
+            output_directory.name,
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--to=epub', commands[0])
+        self.assertTrue((output_directory / 'Книга.epub').is_file())
+
     def test_markdown_and_text_inputs_can_be_converted_to_epub_and_pdf(self):
         markdown_path = self.directory / 'Книга.md'
         markdown_path.write_text('# Заголовок\n\nТекст книги.\n', encoding='utf-8')
