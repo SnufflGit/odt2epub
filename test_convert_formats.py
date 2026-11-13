@@ -908,6 +908,10 @@ Metadata Stream: yes
             input_path = Path(command[command.index('--output') - 1])
             pandoc_input = input_path.read_bytes()
             pandoc_input_content.append(pandoc_input)
+            pandoc_output = pandoc_input.replace(
+                b'src="odt2epub-media:',
+                b'src="../odt2epub-media:',
+            )
             with zipfile.ZipFile(io.BytesIO(self.epub_bytes), 'r') as source:
                 with zipfile.ZipFile(
                     command[command.index('--output') + 1],
@@ -920,7 +924,7 @@ Metadata Stream: yes
                                 b'<?xml version="1.0" encoding="UTF-8"?>'
                                 b'<html xmlns="http://www.w3.org/1999/xhtml">'
                                 b'<body>'
-                                + pandoc_input
+                                + pandoc_output
                                 + b'</body></html>'
                             )
                         target.writestr(info, content)
@@ -969,6 +973,8 @@ Metadata Stream: yes
             )
             chapter = ET.fromstring(archive.read('OEBPS/chapter1.xhtml'))
             xhtml_ns = {'x': 'http://www.w3.org/1999/xhtml'}
+            chapter_content = archive.read('OEBPS/chapter1.xhtml')
+            self.assertNotIn(b'odt2epub-media:', chapter_content)
             self.assertEqual(
                 chapter.find('.//x:audio/x:source', xhtml_ns).get('src'),
                 'obsidian-media/asset-0001.mp3',

@@ -445,12 +445,21 @@ def add_obsidian_embedded_media_to_epub(epub_path, source_path):
                 changed = False
                 for element in document.iter():
                     media_source = element.get('src', '')
-                    if not media_source.startswith(source_prefix):
+                    source_marker_index = media_source.find(source_prefix)
+                    if source_marker_index < 0:
+                        continue
+                    relative_prefix = media_source[:source_marker_index]
+                    if any(
+                        part not in ('.', '..')
+                        for part in PurePosixPath(relative_prefix).parts
+                    ):
                         continue
 
                     try:
                         reference = base64.urlsafe_b64decode(
-                            media_source[len(source_prefix):].encode('ascii')
+                            media_source[
+                                source_marker_index + len(source_prefix):
+                            ].encode('ascii')
                         )
                     except (ValueError, UnicodeError) as e:
                         raise ValueError(
