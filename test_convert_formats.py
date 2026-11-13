@@ -60,8 +60,19 @@ class PandocFormatTests(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn('pandoc не найден в PATH', stderr.getvalue())
+        self.assertIn('pdflatex не найден в PATH', stderr.getvalue())
         self.assertIn('pdftotext не найден в PATH', stderr.getvalue())
         self.assertIn('pdftoppm не найден в PATH', stderr.getvalue())
+
+    def test_missing_pdflatex_is_reported_before_running_pandoc(self):
+        with patch('convert.shutil.which', return_value=None):
+            commands, _, stderr = self.run_conversion(
+                'pdf',
+                mode='quiet',
+            )
+
+        self.assertEqual(commands, [])
+        self.assertIn('pdflatex не найден', stderr)
 
     def test_russian_odt_content_and_filename_are_preserved_with_default_author(self):
         source_path = self.directory / 'Русская книга.odt'

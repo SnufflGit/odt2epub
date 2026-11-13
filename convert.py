@@ -127,6 +127,7 @@ def warn_missing_external_utilities():
     """Предупредить об отсутствующих внешних утилитах конвертации."""
     utilities = {
         'pandoc': 'часть маршрутов конвертации требует Pandoc',
+        'pdflatex': 'создание PDF через Pandoc требует PDF-движок pdflatex',
         'pdftotext': 'извлечение текста из PDF требует Poppler',
         'pdftoppm': 'обработка сканированных PDF требует Poppler',
     }
@@ -2118,6 +2119,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     pandoc_command.append('--toc')
 
             def run_pandoc(command):
+                if args.format == 'pdf' and shutil.which('pdflatex') is None:
+                    log_error(
+                        'pdflatex не найден. Установите TeX Live '
+                        '(например, пакет texlive-latex-base) для создания PDF.'
+                    )
+                    return False
                 try:
                     subprocess.run(
                         command,
