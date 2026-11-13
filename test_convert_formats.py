@@ -60,11 +60,11 @@ class PandocFormatTests(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn('pandoc не найден в PATH', stderr.getvalue())
-        self.assertIn('pdflatex не найден в PATH', stderr.getvalue())
+        self.assertIn('xelatex не найден в PATH', stderr.getvalue())
         self.assertIn('pdftotext не найден в PATH', stderr.getvalue())
         self.assertIn('pdftoppm не найден в PATH', stderr.getvalue())
 
-    def test_missing_pdflatex_is_reported_before_running_pandoc(self):
+    def test_missing_xelatex_is_reported_before_running_pandoc(self):
         with patch('convert.shutil.which', return_value=None):
             commands, _, stderr = self.run_conversion(
                 'pdf',
@@ -72,7 +72,7 @@ class PandocFormatTests(unittest.TestCase):
             )
 
         self.assertEqual(commands, [])
-        self.assertIn('pdflatex не найден', stderr)
+        self.assertIn('xelatex не найден', stderr)
 
     def test_russian_odt_content_and_filename_are_preserved_with_default_author(self):
         source_path = self.directory / 'Русская книга.odt'
@@ -520,6 +520,9 @@ class PandocFormatTests(unittest.TestCase):
                 self.assertEqual(len(commands), 1)
                 command = commands[0]
                 self.assertIn(f'--to={pandoc_writer}', command)
+                if output_format == 'pdf':
+                    self.assertIn('--pdf-engine=xelatex', command)
+                    self.assertIn('mainfont=DejaVu Serif', command)
                 output_path = Path(command[command.index('--output') + 1])
                 self.assertEqual(output_path, self.directory / f'Книга.{output_format}')
                 self.assertTrue(output_path.is_file())

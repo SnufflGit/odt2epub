@@ -58,6 +58,7 @@ NAMESPACES = {
 
 OUTPUT_MODE = 'verbose'
 LOG_FILE_PATH = None
+PDF_ENGINE = 'xelatex'
 DEFAULT_AUTHOR = 'Шмель'
 DEFAULT_PUBLISHER = 'Самиздат'
 DEFAULT_RIGHTS = '© Шмель, 2026'
@@ -127,7 +128,7 @@ def warn_missing_external_utilities():
     """Предупредить об отсутствующих внешних утилитах конвертации."""
     utilities = {
         'pandoc': 'часть маршрутов конвертации требует Pandoc',
-        'pdflatex': 'создание PDF через Pandoc требует PDF-движок pdflatex',
+        PDF_ENGINE: 'создание PDF через Pandoc требует PDF-движок XeLaTeX',
         'pdftotext': 'извлечение текста из PDF требует Poppler',
         'pdftoppm': 'обработка сканированных PDF требует Poppler',
     }
@@ -2094,6 +2095,9 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 f'--from={source_format}',
                 f'--to={pandoc_formats[args.format]}',
             ]
+            if args.format == 'pdf':
+                pandoc_command.append(f'--pdf-engine={PDF_ENGINE}')
+                pandoc_command.extend(['-V', 'mainfont=DejaVu Serif'])
             if is_pdf:
                 pandoc_command.extend(['-M', f'title={explicit_title or Path(input_path).stem}'])
                 pandoc_command.extend(['-M', f'lang={explicit_lang or "ru"}'])
@@ -2119,10 +2123,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     pandoc_command.append('--toc')
 
             def run_pandoc(command):
-                if args.format == 'pdf' and shutil.which('pdflatex') is None:
+                if args.format == 'pdf' and shutil.which(PDF_ENGINE) is None:
                     log_error(
-                        'pdflatex не найден. Установите TeX Live '
-                        '(например, пакет texlive-latex-base) для создания PDF.'
+                        'xelatex не найден. Установите TeX Live '
+                        '(например, пакеты texlive-xetex, '
+                        'texlive-latex-recommended и fonts-dejavu-core) '
+                        'для создания PDF с поддержкой Unicode.'
                     )
                     return False
                 try:
