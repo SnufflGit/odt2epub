@@ -2234,7 +2234,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         return False
             else:
                 pandoc_input_path = input_path
-                if is_markdown and args.format == 'pdf':
+                if is_markdown and args.format in ('epub', 'pdf'):
                     try:
                         markdown_bytes = Path(input_path).read_bytes()
                     except OSError as e:

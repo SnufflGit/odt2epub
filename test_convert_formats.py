@@ -605,6 +605,54 @@ class PandocFormatTests(unittest.TestCase):
         self.assertFalse(temporary_inputs[0].exists())
         self.assertTrue(output_path.is_file())
 
+    def test_markdown_epub_rewrites_horizontal_rule_before_wikilink_in_temp_file(self):
+        markdown_path = self.directory / 'Книга.md'
+        original_markdown = (
+            '# Заголовок\n\n---\n![[Библия/Обложка.jpg]]\n\n'
+            '---\n## Следующий раздел\n'
+        ).encode('utf-8')
+        markdown_path.write_bytes(original_markdown)
+        output_path = self.directory / 'Книга.epub'
+        commands = []
+        temporary_inputs = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(input_path)
+            self.assertNotEqual(input_path, markdown_path)
+            self.assertEqual(
+                input_path.read_bytes(),
+                original_markdown.replace(b'\n---\n', b'\n***\n'),
+            )
+            self.assertIn(
+                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+                command,
+            )
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--output',
+            str(output_path),
+            '--media-dir',
+            str(self.directory),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--to=epub', commands[0])
+        self.assertEqual(markdown_path.read_bytes(), original_markdown)
+        self.assertFalse(temporary_inputs[0].exists())
+        self.assertTrue(output_path.is_file())
+
     def test_markdown_pdf_rewrite_preserves_front_matter_and_fenced_code(self):
         markdown_bytes = (
             b'---\ntitle: Book\n---\n'
