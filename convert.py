@@ -195,7 +195,6 @@ def _prepare_markdown_pdf_source(markdown_bytes):
                     break
 
     replace_indexes = []
-    has_obsidian_embed_rule = False
     fence_marker = None
     for index in range(front_matter_end, len(lines)):
         line = lines[index]
@@ -216,16 +215,7 @@ def _prepare_markdown_pdf_source(markdown_bytes):
 
         if MARKDOWN_HORIZONTAL_RULE_PATTERN.fullmatch(line):
             replace_indexes.append(index)
-            next_index = index + 1
-            while next_index < len(lines) and not lines[next_index].strip():
-                next_index += 1
-            if (
-                next_index < len(lines)
-                and re.match(rb'^ {0,3}!\[\[', lines[next_index])
-            ):
-                has_obsidian_embed_rule = True
-
-    if not has_obsidian_embed_rule:
+    if not replace_indexes:
         return markdown_bytes, 0
 
     for index in replace_indexes:

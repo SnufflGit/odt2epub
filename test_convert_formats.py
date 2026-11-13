@@ -669,10 +669,18 @@ class PandocFormatTests(unittest.TestCase):
         self.assertIn(b'\n***\n![[cover.jpg]]', prepared_markdown)
         self.assertIn(b'```markdown\n---\n![[example.jpg]]\n```', prepared_markdown)
 
-        fenced_only = b'```markdown\n---\n![[example.jpg]]\n```\n\n---\n'
-        unchanged_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
-            fenced_only,
+        markdown_without_wikilinks = b'# Title\n\n---\n## Section\n'
+        prepared_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
+            markdown_without_wikilinks,
         )
+        self.assertEqual(replaced_rules, 1)
+        self.assertEqual(
+            prepared_markdown,
+            b'# Title\n\n***\n## Section\n',
+        )
+
+        fenced_only = b'```markdown\n---\n![[example.jpg]]\n```\n'
+        unchanged_markdown, replaced_rules = convert._prepare_markdown_pdf_source(fenced_only)
         self.assertEqual(unchanged_markdown, fenced_only)
         self.assertEqual(replaced_rules, 0)
 
