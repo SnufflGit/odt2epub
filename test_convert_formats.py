@@ -970,13 +970,17 @@ Metadata Stream: yes
             chapter = ET.fromstring(archive.read('OEBPS/chapter1.xhtml'))
             xhtml_ns = {'x': 'http://www.w3.org/1999/xhtml'}
             self.assertEqual(
-                chapter.find('.//x:audio', xhtml_ns).get('src'),
+                chapter.find('.//x:audio/x:source', xhtml_ns).get('src'),
                 'obsidian-media/asset-0001.mp3',
             )
             video = chapter.find('.//x:video', xhtml_ns)
             self.assertEqual(
-                video.get('src'),
+                video.find('x:source', xhtml_ns).get('src'),
                 'obsidian-media/asset-0002.webm',
+            )
+            self.assertEqual(
+                video.find('x:source', xhtml_ns).get('type'),
+                'video/webm',
             )
             self.assertEqual(video.get('width'), '320')
             self.assertEqual(video.get('height'), '240')
@@ -1005,6 +1009,10 @@ Metadata Stream: yes
                 self.assertEqual(converted_count, 1)
                 self.assertIn(
                     f'<{media_kind} controls="controls"'.encode('ascii'),
+                    prepared,
+                )
+                self.assertIn(
+                    f'type="{_media_type}"'.encode('ascii'),
                     prepared,
                 )
 

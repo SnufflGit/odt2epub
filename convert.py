@@ -364,6 +364,7 @@ def _convert_obsidian_media_embeds(text, include_epub_media=False):
 
         converted_count += 1
         media_kind = media_type[0].encode('ascii')
+        media_mime_type = media_type[1].encode('ascii')
         media_token = base64.urlsafe_b64encode(media_reference)
         attributes = b''
         if size:
@@ -375,11 +376,13 @@ def _convert_obsidian_media_embeds(text, include_epub_media=False):
         return (
             b'<'
             + media_kind
-            + b' controls="controls" preload="metadata" src="odt2epub-media:'
-            + media_token
-            + b'"'
+            + b' controls="controls" preload="metadata"'
             + attributes
-            + b'>'
+            + b'><source src="odt2epub-media:'
+            + media_token
+            + b'" type="'
+            + media_mime_type
+            + b'"/>'
             + 'Воспроизведение не поддерживается этой EPUB-читалкой.'.encode('utf-8')
             + b'</'
             + media_kind
