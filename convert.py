@@ -179,6 +179,92 @@ def get_image_mime_type(ext):
 # Поддерживаемые расширения изображений для обложек
 SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif')
 
+
+def _append_timestamp_suffix(output_path):
+    output_path = Path(output_path)
+    timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
+    return output_path.with_name(
+        f'{output_path.stem}_({timestamp}){output_path.suffix}'
+    )
+
+
+def _find_cover_file(input_path, media_dir='.', media_dir_explicit=False, recursive=True):
+    source_directory = Path(os.path.abspath(input_path)).parent
+    cover_stem = Path(input_path).stem
+
+    def candidate_in(directory):
+        for extension in SUPPORTED_IMAGE_EXTENSIONS:
+            candidate = directory / f'{cover_stem}{extension}'
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def is_within(path, parent):
+        try:
+            path.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    def search_tree(root, excluded_roots=(), skip_root=False):
+        if not root.is_dir():
+            return None
+
+        matches = []
+        for current, directories, _ in os.walk(str(root)):
+            current_directory = Path(current)
+            directories.sort()
+            if any(
+                is_within(current_directory, excluded_root)
+                for excluded_root in excluded_roots
+            ):
+                directories.clear()
+                continue
+            directories[:] = [
+                directory
+                for directory in directories
+                if not any(
+                    is_within(current_directory / directory, excluded_root)
+                    for excluded_root in excluded_roots
+                )
+            ]
+            if not recursive:
+                directories.clear()
+            if skip_root and current_directory == root:
+                continue
+
+            candidate = candidate_in(current_directory)
+            if candidate:
+                depth = len(current_directory.relative_to(root).parts)
+                matches.append((depth, candidate))
+
+        if matches:
+            matches.sort(key=lambda match: match[0])
+            return matches[0][1]
+        return None
+
+    source_cover = candidate_in(source_directory)
+    if source_cover:
+        return source_cover
+
+    media_directory = (
+        Path(os.path.abspath(media_dir))
+        if media_dir_explicit
+        else source_directory / 'media'
+    )
+    media_cover = search_tree(media_directory)
+    if media_cover:
+        return media_cover
+
+    if not recursive:
+        return None
+    return search_tree(
+        source_directory,
+        excluded_roots=(media_directory,),
+        skip_root=True,
+    )
+
+
 MARKDOWN_HORIZONTAL_RULE_PATTERN = re.compile(rb'^ {0,3}---[ \t]*(\r?\n)?$')
 MARKDOWN_FENCE_PATTERN = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
 MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(rb'^ {0,3}(`+|~+)[ \t]*(?:\r?\n)?$')
@@ -1804,15 +1890,15 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     parser.add_argument('--mode', choices=('quiet', 'summary', 'verbose'), default='verbose',
                         help='Режим вывода: quiet — только критические ошибки, summary — строка результата по файлу, verbose — подробный вывод')
     parser.add_argument('--log-file', metavar='PATH', help='Записывать подробный журнал в файл (добавление в конец; относительный путь от текущей папки)')
-    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF); автопоиск по имени выполняется для ODT, Markdown и PDF при создании EPUB')
-    parser.add_argument('-o', '--output', help='Путь к файлу результата или папке назначения; для ODT сохраняется суффикс даты')
+    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF); автопоиск одноимённого файла выполняется для ODT, Markdown, TXT и PDF при создании EPUB')
+    parser.add_argument('-o', '--output', help='Точный путь к файлу результата или папка назначения для автоматически именованных результатов')
     overwrite_group = parser.add_mutually_exclusive_group()
     overwrite_group.add_argument('--ask-overwrite', action='store_true',
                                  help='Спрашивать перед заменой существующего файла (иначе существующий файл пропускается)')
     overwrite_group.add_argument('--force', action='store_true',
                                  help='Принудительно перезаписывать существующие файлы без запроса')
     parser.add_argument('--no-timestamp', action='store_true',
-                        help='Не добавлять дату и время к имени EPUB, созданного из ODT; действует и в пакетном режиме')
+                        help='Не добавлять суффикс даты и времени к автоматически формируемому имени результата')
     parser.add_argument('-t', '--title', help='Название книги (по умолчанию: имя исходного файла без расширения)')
     parser.add_argument(
         '--identifier',
@@ -1855,7 +1941,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         help='Исключить файл или папку (можно повторять; glob-шаблоны сверяются с именем и относительным путём)')
     parser.add_argument('--exclude-file', help='Файл со списком исключений (по одному на строку, # для комментариев)')
     parser.add_argument('--no-recursive', action='store_true', help='Отключить рекурсивный поиск в поддиректориях (по умолчанию: включен)')
-    parser.add_argument('-m', '--media-dir', dest='media_dir', default=None, help='Папка для автопоиска обложек/медиафайлов (по умолчанию: текущая папка, рекурсивно с подпапками)')
+    parser.add_argument('-m', '--media-dir', dest='media_dir', default=None, help='Папка поиска медиафайлов; для обложки используется как приоритетная только при явном указании')
     parser.add_argument('--split-method', dest='split_method', choices=SPLIT_METHODS, default=None,
                         help='Метод разбиения EPUB на разделы: page-break — по разрывам страниц ODT (по умолчанию), '
                                'heading — по заголовкам, none — без разбиения (единая глава)')
@@ -1898,7 +1984,6 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             ('layout_method', '--layout-method', args.layout_method is not None, None),
             ('css', '--css', args.css is not None, None),
             ('toc', '--toc', args.toc, False),
-            ('no_timestamp', '--no-timestamp', args.no_timestamp, False),
             ('media_dir', '--media-dir', args.media_dir_explicit, None),
             ('split_method', '--split-method', args.split_method is not None, None),
         ):
@@ -2203,7 +2288,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         if args.format in ('md', 'pdf', 'txt') or is_text_source or is_pdf:
             pandoc_formats = {'md': 'markdown', 'pdf': 'pdf', 'txt': 'plain', 'epub': 'epub'}
             format_names = {'md': 'Markdown', 'pdf': 'PDF', 'txt': 'TXT', 'epub': 'EPUB'}
-            output_path = os.path.abspath(explicit_output) if explicit_output else str(Path(input_path).with_suffix(f'.{args.format}'))
+            if explicit_output:
+                output_path = os.path.abspath(explicit_output)
+            else:
+                output_path = str(Path(input_path).with_suffix(f'.{args.format}'))
+                if not args.no_timestamp:
+                    output_path = str(_append_timestamp_suffix(output_path))
             if paths_refer_to_same_file(input_path, output_path):
                 log_error(f'Путь результата совпадает с исходным файлом: {input_path}')
                 result_info['output_path'] = output_path
@@ -2268,17 +2358,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     if not cover_path.is_file():
                         log_error(f'Файл обложки не найден: {cover_path}')
                         return False
-                elif is_markdown or is_pdf:
-                    source_directory = Path(input_path).parent
-                    cover_path = next(
-                        (
-                            source_directory / f'{Path(input_path).stem}{extension}'
-                            for extension in SUPPORTED_IMAGE_EXTENSIONS
-                            if (
-                                source_directory / f'{Path(input_path).stem}{extension}'
-                            ).is_file()
-                        ),
-                        None,
+                else:
+                    cover_path = _find_cover_file(
+                        input_path,
+                        media_dir=args.media_dir,
+                        media_dir_explicit=args.media_dir_explicit,
+                        recursive=not args.no_recursive,
                     )
                     if cover_path:
                         log_ok(f'Обложка найдена автоматически: {cover_path}')
@@ -2492,33 +2577,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             cover_mime_type = get_image_mime_type(ext)
             log_ok(f'Обложка: {os.path.basename(cover_path)} ({cover_mime_type})')
         else:
-            # Автопоиск обложки в media-директории (по умолчанию: текущая папка с подпапками)
-            odt_stem = Path(input_path).stem
-
-            def _find_cover_in(dir_path):
-                for ext in SUPPORTED_IMAGE_EXTENSIONS:
-                    candidate = dir_path / f'{odt_stem}{ext}'
-                    if candidate.exists():
-                        return candidate
-                return None
-
-            found_candidate = None
-            search_root = os.path.abspath(media_dir) if media_dir else '.'
-            if not os.path.isdir(search_root):
-                log_error(f'Папка медиа не найдена: {search_root}', critical=False)
-            elif media_recursive and not args.no_recursive:
-                # Рекурсивный обход: сначала более мелкие уровни глубины
-                matches = []
-                for root, dirs, files in os.walk(search_root):
-                    dirs.sort()
-                    cand = _find_cover_in(Path(root))
-                    if cand:
-                        matches.append((root.count(os.sep), cand))
-                if matches:
-                    matches.sort(key=lambda x: x[0])
-                    found_candidate = matches[0][1]
-            else:
-                found_candidate = _find_cover_in(Path(search_root))
+            found_candidate = _find_cover_file(
+                input_path,
+                media_dir=media_dir,
+                media_dir_explicit=args.media_dir_explicit,
+                recursive=media_recursive and not args.no_recursive,
+            )
 
             if found_candidate:
                 try:
@@ -2530,7 +2594,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     log_error(f'Ошибка чтения найденной обложки {found_candidate.name}: {e}', critical=False)
                     cover_buffer = None
             else:
-                log('ℹ️  Обложка не указана и не найдена в папке медиа (по умолчанию: текущая папка с подпапками)')
+                log('ℹ️  Обложка не указана и не найдена в папке исходника, приоритетной папке медиа или подпапках')
 
         # Определяем выходной путь
         if explicit_output:
@@ -2538,12 +2602,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         else:
             output_path = str(Path(input_path).with_suffix('.epub'))
             if not args.no_timestamp:
-                timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
-                output_path = str(
-                    Path(output_path).with_name(
-                        f'{Path(output_path).stem}_({timestamp}){Path(output_path).suffix}'
-                    )
-                )
+                output_path = str(_append_timestamp_suffix(output_path))
         if paths_refer_to_same_file(input_path, output_path):
             log_error(f'Путь результата совпадает с исходным файлом: {input_path}')
             result_info['output_path'] = output_path
@@ -2660,6 +2719,8 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             if explicit_output
             else str(directory.parent / f'{directory.name or "Images"}.epub')
         )
+        if not explicit_output and not args.no_timestamp:
+            output_path = str(_append_timestamp_suffix(output_path))
         result_info['output_path'] = output_path
         if any(paths_refer_to_same_file(output_path, image_path) for image_path in image_paths):
             log_error(f'Путь результата совпадает с исходным изображением: {output_path}')
@@ -2870,6 +2931,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         source_path = Path(source_path)
         source_directory = source_path if image_folder else source_path.parent
         output_path = None
+        output_is_directory = False
         if args.output:
             requested_output = Path(args.output)
             if not requested_output.is_absolute():
@@ -2884,6 +2946,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 )
             )
             if is_output_directory:
+                output_is_directory = True
                 source_name = source_path.name if image_folder else source_path.stem
                 if not source_name:
                     source_name = 'Images'
@@ -2898,16 +2961,9 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             else:
                 output_path = source_path.with_suffix(f'.{args.format}')
 
-        if (
-            not image_folder
-            and args.format == 'epub'
-            and source_path.suffix.lower() == '.odt'
-            and not args.no_timestamp
-        ):
-            timestamp = datetime.now().strftime('%H:%M_%d.%m.%Y')
-            output_path = output_path.with_name(
-                f'{output_path.stem}_({timestamp}){output_path.suffix}'
-            )
+        generated_name = not args.output or output_is_directory or output_path is None
+        if generated_name and not args.no_timestamp:
+            output_path = _append_timestamp_suffix(output_path)
         return os.path.abspath(output_path)
 
     planned_output_paths = {}

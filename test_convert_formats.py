@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -544,7 +545,8 @@ Metadata Stream: yes
             self.assertEqual(uid_meta.get('content'), identifier)
 
     def run_conversion(self, output_format, explicit_output=None, run_side_effect=None, mode=None,
-                       overwrite_options=(), input_path=None, extra_args=()):
+                       overwrite_options=(), input_path=None, extra_args=(),
+                       no_timestamp=True):
         commands = []
         input_path = input_path or self.input_path
 
@@ -560,6 +562,8 @@ Metadata Stream: yes
             args.extend(['--output', str(explicit_output)])
         if mode:
             args.extend(['--mode', mode])
+        if no_timestamp:
+            args.append('--no-timestamp')
         args.extend(overwrite_options)
         args.extend(extra_args)
 
@@ -590,6 +594,51 @@ Metadata Stream: yes
                 output_path = Path(command[command.index('--output') + 1])
                 self.assertEqual(output_path, self.directory / f'Книга.{output_format}')
                 self.assertTrue(output_path.is_file())
+
+    def test_all_document_sources_use_timestamp_suffix_by_default(self):
+        source_paths = {
+            'Документ.odt': self.directory / 'Документ.odt',
+            'Текст.md': self.directory / 'Текст.md',
+            'Заметка.txt': self.directory / 'Заметка.txt',
+            'Скан.pdf': self.directory / 'Скан.pdf',
+        }
+        shutil.copyfile(
+            Path(__file__).with_name('test_Draft.odt'),
+            source_paths['Документ.odt'],
+        )
+        source_paths['Текст.md'].write_text('# Текст\n', encoding='utf-8')
+        source_paths['Заметка.txt'].write_text('Заметка\n', encoding='utf-8')
+        source_paths['Скан.pdf'].write_bytes(b'%PDF')
+
+        def fake_run(command, **_kwargs):
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Metadata Stream: no\n',
+                })()
+            if command[0] == 'pdftotext':
+                Path(command[-1]).write_text('Текст из PDF\n', encoding='utf-8')
+                return
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            *(str(path) for path in source_paths.values()),
+            '--format',
+            'epub',
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        for source_name in source_paths:
+            output_path = next(self.directory.glob(f'{Path(source_name).stem}_(*).epub'))
+            self.assertRegex(
+                output_path.name,
+                rf'^{re.escape(Path(source_name).stem)}_'
+                r'\(\d{2}:\d{2}_\d{2}\.\d{2}\.\d{4}\)\.epub$',
+            )
 
     def test_output_extension_selects_format_when_format_is_omitted(self):
         markdown_path = self.directory / 'Книга.md'
@@ -845,6 +894,7 @@ Metadata Stream: yes
             str(markdown_path),
             '--output',
             output_directory.name,
+            '--no-timestamp',
             '--mode',
             'quiet',
         ]):
@@ -881,6 +931,104 @@ Metadata Stream: yes
                     self.assertEqual(output_path, self.directory / f'{input_path.stem}.{output_format}')
                     self.assertTrue(output_path.is_file())
 
+    def test_txt_epub_uses_same_name_cover_from_media_subdirectory(self):
+        text_path = self.directory / 'Книга.txt'
+        text_path.write_text('Текст книги.\n', encoding='utf-8')
+        cover_path = self.directory / 'media' / 'Книга.png'
+        cover_path.parent.mkdir()
+        cover_path.write_bytes(b'cover image')
+
+        commands, _, stderr = self.run_conversion('epub', input_path=text_path)
+
+        self.assertEqual(stderr, '')
+        self.assertEqual(len(commands), 1)
+        self.assertIn(f'--epub-cover-image={cover_path}', commands[0])
+
+    def test_cover_search_prioritizes_source_then_media_then_other_subfolders(self):
+        source_directory = self.directory / 'source'
+        source_directory.mkdir()
+        input_path = source_directory / 'Книга.md'
+        input_path.write_text('# Книга\n', encoding='utf-8')
+        media_cover = source_directory / 'media' / 'Книга.jpg'
+        media_cover.parent.mkdir()
+        media_cover.write_bytes(b'media cover')
+        other_cover = source_directory / 'other' / 'Книга.png'
+        other_cover.parent.mkdir()
+        other_cover.write_bytes(b'other cover')
+        source_cover = source_directory / 'Книга.gif'
+        source_cover.write_bytes(b'source cover')
+
+        self.assertEqual(
+            convert._find_cover_file(input_path),
+            source_cover,
+        )
+        source_cover.unlink()
+        self.assertEqual(
+            convert._find_cover_file(input_path),
+            media_cover,
+        )
+        media_cover.unlink()
+        self.assertEqual(
+            convert._find_cover_file(input_path),
+            other_cover,
+        )
+
+    def test_explicit_media_directory_is_searched_before_other_subfolders(self):
+        source_directory = self.directory / 'source'
+        source_directory.mkdir()
+        input_path = source_directory / 'Книга.txt'
+        input_path.write_text('Текст.\n', encoding='utf-8')
+        media_directory = self.directory / 'custom-media'
+        media_directory.mkdir()
+        media_cover = media_directory / 'Книга.webp'
+        media_cover.write_bytes(b'media cover')
+        other_cover = source_directory / 'other' / 'Книга.jpg'
+        other_cover.parent.mkdir()
+        other_cover.write_bytes(b'other cover')
+
+        self.assertEqual(
+            convert._find_cover_file(
+                input_path,
+                media_dir=media_directory,
+                media_dir_explicit=True,
+            ),
+            media_cover,
+        )
+
+    def test_odt_epub_uses_cover_from_media_subdirectory(self):
+        odt_path = self.directory / 'Книга.odt'
+        content_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+  xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:text><text:p>Текст книги.</text:p></office:text></office:body>
+</office:document-content>'''
+        meta_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<office:document-meta
+  xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">
+  <office:meta/>
+</office:document-meta>'''
+        with zipfile.ZipFile(odt_path, 'w') as archive:
+            archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+            archive.writestr('content.xml', content_xml.encode('utf-8'))
+            archive.writestr('meta.xml', meta_xml.encode('utf-8'))
+        cover_path = self.directory / 'media' / 'Книга.jpg'
+        cover_path.parent.mkdir()
+        cover_path.write_bytes(b'cover image')
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(odt_path),
+            '--no-timestamp',
+            '--mode',
+            'quiet',
+        ]):
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                convert.main()
+
+        with zipfile.ZipFile(self.directory / 'Книга.epub') as archive:
+            self.assertEqual(archive.read('OEBPS/images/cover.jpg'), b'cover image')
+
     def test_markdown_epub_automatically_uses_same_name_cover(self):
         markdown_path = self.directory / 'Книга.md'
         markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
@@ -908,6 +1056,61 @@ Metadata Stream: yes
 
         self.assertEqual(len(commands), 1)
         self.assertIn(f'--epub-cover-image={cover_path}', commands[0])
+
+    def test_markdown_epub_recursively_finds_same_name_cover(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
+        cover_path = self.directory / 'Обложки' / 'Книга.jpg'
+        cover_path.parent.mkdir()
+        cover_path.write_bytes(b'cover image')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn(f'--epub-cover-image={cover_path}', commands[0])
+
+    def test_markdown_epub_no_recursive_skips_cover_in_subdirectory(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
+        cover_path = self.directory / 'Обложки' / 'Книга.jpg'
+        cover_path.parent.mkdir()
+        cover_path.write_bytes(b'cover image')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--no-recursive',
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertFalse(any(arg.startswith('--epub-cover-image=') for arg in commands[0]))
 
     def test_image_folder_creates_epub_in_natural_image_order(self):
         image_directory = self.directory / 'Фотоальбом'
@@ -1166,6 +1369,7 @@ Metadata Stream: yes
 
         with patch.object(sys, 'argv', [
             'convert.py', str(image_directory), '--format', 'epub', '--no-recursive',
+            '--no-timestamp',
         ]):
             with patch('convert.subprocess.run', side_effect=fake_run):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -1196,7 +1400,8 @@ Metadata Stream: yes
     def test_pdf_input_is_extracted_and_converted_to_epub(self):
         pdf_path = self.directory / 'PDF книга.pdf'
         pdf_path.write_bytes(b'%PDF')
-        cover_path = self.directory / 'PDF книга.jpg'
+        cover_path = self.directory / 'Обложки' / 'PDF книга.jpg'
+        cover_path.parent.mkdir()
         cover_path.write_bytes(b'cover image')
         commands = []
 
@@ -1226,6 +1431,7 @@ Metadata Stream: yes
         stderr = io.StringIO()
         with patch.object(sys, 'argv', [
             'convert.py', str(pdf_path), '--format', 'epub', '--title', 'Моя книга',
+            '--no-timestamp',
         ]):
             with patch('convert.subprocess.run', side_effect=fake_run):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -1268,7 +1474,9 @@ Metadata Stream: yes
             else:
                 Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
 
-        with patch.object(sys, 'argv', ['convert.py', str(books), '--format', 'epub']):
+        with patch.object(sys, 'argv', [
+            'convert.py', str(books), '--format', 'epub', '--no-timestamp',
+        ]):
             with patch('convert.subprocess.run', side_effect=fake_run):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     convert.main()
@@ -1383,7 +1591,11 @@ Metadata Stream: yes
 
     def test_custom_output_path_is_passed_to_pandoc(self):
         output_path = self.directory / 'результат.txt'
-        commands, _, stderr = self.run_conversion('txt', explicit_output=output_path)
+        commands, _, stderr = self.run_conversion(
+            'txt',
+            explicit_output=output_path,
+            no_timestamp=False,
+        )
         self.assertEqual(stderr, '')
         self.assertEqual(
             Path(commands[0][commands[0].index('--output') + 1]),
@@ -1418,8 +1630,14 @@ Metadata Stream: yes
                     convert.main()
 
         self.assertEqual(len(commands), 2)
-        self.assertTrue((output_directory / 'First.epub').is_file())
-        self.assertTrue((output_directory / 'Second.epub').is_file())
+        output_paths = list(output_directory.glob('*.epub'))
+        self.assertEqual(len(output_paths), 2)
+        for source_name in ('First', 'Second'):
+            output_path = next(output_directory.glob(f'{source_name}_(*).epub'))
+            self.assertRegex(
+                output_path.name,
+                rf'^{source_name}_\(\d{{2}}:\d{{2}}_\d{{2}}\.\d{{2}}\.\d{{4}}\)\.epub$',
+            )
 
     def test_relative_output_directory_is_resolved_from_source_file_folder(self):
         source_directory = self.directory / 'Source'
@@ -1439,6 +1657,7 @@ Metadata Stream: yes
             'epub',
             '--output',
             'converted/',
+            '--no-timestamp',
         ]):
             with patch('convert.subprocess.run', side_effect=fake_run):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
