@@ -270,8 +270,8 @@ MARKDOWN_FENCE_PATTERN = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
 MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(rb'^ {0,3}(`+|~+)[ \t]*(?:\r?\n)?$')
 
 
-def _prepare_markdown_pdf_source(markdown_bytes):
-    lines = markdown_bytes.splitlines(keepends=True)
+def _prepare_markdown_source(source_bytes):
+    lines = source_bytes.splitlines(keepends=True)
     front_matter_end = 0
     if lines:
         first_line = lines[0][3:] if lines[0].startswith(b'\xef\xbb\xbf') else lines[0]
@@ -303,7 +303,7 @@ def _prepare_markdown_pdf_source(markdown_bytes):
         if MARKDOWN_HORIZONTAL_RULE_PATTERN.fullmatch(line):
             replace_indexes.append(index)
     if not replace_indexes:
-        return markdown_bytes, 0
+        return source_bytes, 0
 
     for index in replace_indexes:
         lines[index] = re.sub(rb'^( {0,3})---', rb'\1***', lines[index], count=1)
@@ -2438,7 +2438,24 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         return False
 
                     if has_extractable_text:
-                        pandoc_input_path = extracted_text_path
+                        try:
+                            extracted_bytes = extracted_text_path.read_bytes()
+                        except OSError as e:
+                            log_error(f'Не удалось прочитать извлечённый текст PDF: {e}')
+                            return False
+
+                        normalized_bytes, replaced_rules = _prepare_markdown_source(
+                            extracted_bytes,
+                        )
+                        if replaced_rules:
+                            pandoc_input_path = Path(temp_dir) / 'normalized.txt'
+                            try:
+                                pandoc_input_path.write_bytes(normalized_bytes)
+                            except OSError as e:
+                                log_error(f'Не удалось создать временную копию текста PDF: {e}')
+                                return False
+                        else:
+                            pandoc_input_path = extracted_text_path
                         log_step('2/2', 'Создание EPUB из текста PDF с помощью Pandoc...')
                     else:
                         log('Текстовый слой не найден; страницы PDF будут добавлены в EPUB как изображения.')
@@ -2490,15 +2507,15 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         return False
             else:
                 pandoc_input_path = input_path
-                if is_markdown and args.format in ('epub', 'pdf'):
+                if is_text_source and args.format in ('epub', 'pdf'):
                     try:
-                        markdown_bytes = Path(input_path).read_bytes()
+                        source_bytes = Path(input_path).read_bytes()
                     except OSError as e:
-                        log_error(f'Не удалось прочитать Markdown-файл {input_path}: {e}')
+                        log_error(f'Не удалось прочитать текстовый файл {input_path}: {e}')
                         return False
 
-                    markdown_bytes, replaced_rules = _prepare_markdown_pdf_source(
-                        markdown_bytes,
+                    source_bytes, replaced_rules = _prepare_markdown_source(
+                        source_bytes,
                     )
                     if replaced_rules:
                         try:
@@ -2508,7 +2525,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                                 pandoc_input_path = str(
                                     Path(temp_dir) / Path(input_path).name
                                 )
-                                Path(pandoc_input_path).write_bytes(markdown_bytes)
+                                Path(pandoc_input_path).write_bytes(source_bytes)
                                 resource_paths = dict.fromkeys((
                                     str(Path(input_path).parent),
                                     os.getcwd(),
@@ -2524,7 +2541,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                                 if not run_pandoc(pandoc_command):
                                     return False
                         except OSError as e:
-                            log_error(f'Не удалось создать временную копию Markdown-файла: {e}')
+                            log_error(f'Не удалось создать временную копию текстового файла: {e}')
                             return False
                     else:
                         pandoc_command.extend([pandoc_input_path, '--output', output_path])

@@ -773,7 +773,7 @@ Metadata Stream: yes
             b'```markdown\n---\n![[example.jpg]]\n```\n'
         )
 
-        prepared_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
+        prepared_markdown, replaced_rules = convert._prepare_markdown_source(
             markdown_bytes,
         )
 
@@ -783,7 +783,7 @@ Metadata Stream: yes
         self.assertIn(b'```markdown\n---\n![[example.jpg]]\n```', prepared_markdown)
 
         markdown_without_wikilinks = b'# Title\n\n---\n## Section\n'
-        prepared_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
+        prepared_markdown, replaced_rules = convert._prepare_markdown_source(
             markdown_without_wikilinks,
         )
         self.assertEqual(replaced_rules, 1)
@@ -793,9 +793,53 @@ Metadata Stream: yes
         )
 
         fenced_only = b'```markdown\n---\n![[example.jpg]]\n```\n'
-        unchanged_markdown, replaced_rules = convert._prepare_markdown_pdf_source(fenced_only)
+        unchanged_markdown, replaced_rules = convert._prepare_markdown_source(fenced_only)
         self.assertEqual(unchanged_markdown, fenced_only)
         self.assertEqual(replaced_rules, 0)
+
+    def test_txt_epub_rewrites_horizontal_rule_before_obsidian_embed_in_temp_file(self):
+        text_path = self.directory / 'Книга.txt'
+        original_text = (
+            '# Заголовок\n\n---\n![[Вставки/Изображение.png]]\n\nТекст.\n'
+        ).encode('utf-8')
+        text_path.write_bytes(original_text)
+        output_path = self.directory / 'Книга.epub'
+        temporary_inputs = []
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(input_path)
+            self.assertNotEqual(input_path, text_path)
+            self.assertEqual(
+                input_path.read_bytes(),
+                original_text.replace(b'\n---\n', b'\n***\n'),
+            )
+            self.assertIn(
+                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+                command,
+            )
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(text_path),
+            '--format',
+            'epub',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(text_path.read_bytes(), original_text)
+        self.assertFalse(temporary_inputs[0].exists())
+        self.assertTrue(output_path.is_file())
 
     def test_markdown_pdf_temp_input_is_removed_when_pandoc_fails(self):
         markdown_path = self.directory / 'Книга.md'
@@ -1400,10 +1444,15 @@ Metadata Stream: yes
     def test_pdf_input_is_extracted_and_converted_to_epub(self):
         pdf_path = self.directory / 'PDF книга.pdf'
         pdf_path.write_bytes(b'%PDF')
+        extracted_pdf_text = (
+            '# Заголовок\n\n---\n![[Вставки/Изображение.png]]\n\nТекст книги.\n'
+        )
+        normalized_pdf_text = extracted_pdf_text.replace('\n---\n', '\n***\n')
         cover_path = self.directory / 'Обложки' / 'PDF книга.jpg'
         cover_path.parent.mkdir()
         cover_path.write_bytes(b'cover image')
         commands = []
+        temporary_inputs = []
 
         def fake_run(command, **_kwargs):
             commands.append(command)
@@ -1414,16 +1463,17 @@ Metadata Stream: yes
             if command[0] == 'pdftotext':
                 self.assertEqual(command[1:4], ['-enc', 'UTF-8', '-nopgbrk'])
                 Path(command[-1]).write_text(
-                    '# Заголовок\n\nТекст книги.\n',
+                    extracted_pdf_text,
                     encoding='utf-8',
                 )
                 return
 
-            extracted_text = Path(command[command.index('--output') - 1])
-            self.assertTrue(extracted_text.is_file())
+            pandoc_input = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(pandoc_input)
+            self.assertTrue(pandoc_input.is_file())
             self.assertEqual(
-                extracted_text.read_text(encoding='utf-8'),
-                '# Заголовок\n\nТекст книги.\n',
+                pandoc_input.read_text(encoding='utf-8'),
+                normalized_pdf_text,
             )
             Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
 
@@ -1454,6 +1504,7 @@ Metadata Stream: yes
             self.directory / 'PDF книга.epub',
         )
         self.assertTrue((self.directory / 'PDF книга.epub').is_file())
+        self.assertFalse(temporary_inputs[0].exists())
         self.assertIn('Извлечение текста из PDF', stdout.getvalue())
 
     def test_pdf_directory_scan_includes_pdf_for_epub_output(self):
