@@ -683,20 +683,20 @@ Metadata Stream: yes
         output_path = self.directory / 'Книга.pdf'
         commands = []
         temporary_inputs = []
+        pandoc_input_content = []
+        expected_markdown = original_markdown.replace(
+            b'\n---\n',
+            b'\n***\n',
+        ).replace(
+            '![[Библия/Обложка.jpg]]'.encode('utf-8'),
+            '![](<Библия/Обложка.jpg>)'.encode('utf-8'),
+        )
 
         def fake_run(command, **_kwargs):
             commands.append(command)
             input_path = Path(command[command.index('--output') - 1])
             temporary_inputs.append(input_path)
-            self.assertNotEqual(input_path, markdown_path)
-            self.assertEqual(
-                input_path.read_bytes(),
-                original_markdown.replace(b'\n---\n', b'\n***\n'),
-            )
-            self.assertIn(
-                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
-                command,
-            )
+            pandoc_input_content.append(input_path.read_bytes())
             Path(command[command.index('--output') + 1]).write_bytes(b'converted')
 
         with patch.object(sys, 'argv', [
@@ -714,6 +714,12 @@ Metadata Stream: yes
                     convert.main()
 
         self.assertEqual(len(commands), 1)
+        self.assertNotEqual(temporary_inputs[0], markdown_path)
+        self.assertEqual(pandoc_input_content[0], expected_markdown)
+        self.assertIn(
+            f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
         self.assertEqual(markdown_path.read_bytes(), original_markdown)
         self.assertFalse(temporary_inputs[0].exists())
         self.assertTrue(output_path.is_file())
@@ -728,20 +734,20 @@ Metadata Stream: yes
         output_path = self.directory / 'Книга.epub'
         commands = []
         temporary_inputs = []
+        pandoc_input_content = []
+        expected_markdown = original_markdown.replace(
+            b'\n---\n',
+            b'\n***\n',
+        ).replace(
+            '![[Библия/Обложка.jpg]]'.encode('utf-8'),
+            '![](<Библия/Обложка.jpg>)'.encode('utf-8'),
+        )
 
         def fake_run(command, **_kwargs):
             commands.append(command)
             input_path = Path(command[command.index('--output') - 1])
             temporary_inputs.append(input_path)
-            self.assertNotEqual(input_path, markdown_path)
-            self.assertEqual(
-                input_path.read_bytes(),
-                original_markdown.replace(b'\n---\n', b'\n***\n'),
-            )
-            self.assertIn(
-                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
-                command,
-            )
+            pandoc_input_content.append(input_path.read_bytes())
             Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
 
         with patch.object(sys, 'argv', [
@@ -762,6 +768,68 @@ Metadata Stream: yes
 
         self.assertEqual(len(commands), 1)
         self.assertIn('--to=epub', commands[0])
+        self.assertNotEqual(temporary_inputs[0], markdown_path)
+        self.assertEqual(pandoc_input_content[0], expected_markdown)
+        self.assertIn(
+            f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
+        self.assertEqual(markdown_path.read_bytes(), original_markdown)
+        self.assertFalse(temporary_inputs[0].exists())
+        self.assertTrue(output_path.is_file())
+
+    def test_markdown_epub_converts_obsidian_image_embeds(self):
+        markdown_path = self.directory / 'Книга.md'
+        original_markdown = (
+            '# Книга\n\n'
+            '![[Изображения/Обложка image.png|Обложка книги]]\n\n'
+            '![[Изображения/Схема.svg|320x240]]\n\n'
+            '`![[пример-в-коде.png]]`\n\n'
+            '![[вложение.pdf]]\n\n'
+            '```\n![[пример.png]]\n```\n'
+        ).encode('utf-8')
+        markdown_path.write_bytes(original_markdown)
+        output_path = self.directory / 'Книга.epub'
+        commands = []
+        temporary_inputs = []
+        pandoc_input_content = []
+        expected_markdown = (
+            '# Книга\n\n'
+            '![Обложка книги](<Изображения/Обложка image.png>)\n\n'
+            '![](<Изображения/Схема.svg>){width=320px height=240px}\n\n'
+            '`![[пример-в-коде.png]]`\n\n'
+            '![[вложение.pdf]]\n\n'
+            '```\n![[пример.png]]\n```\n'
+        ).encode('utf-8')
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(input_path)
+            pandoc_input_content.append(input_path.read_bytes())
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertNotEqual(temporary_inputs[0], markdown_path)
+        self.assertEqual(pandoc_input_content[0], expected_markdown)
+        self.assertIn(
+            f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
         self.assertEqual(markdown_path.read_bytes(), original_markdown)
         self.assertFalse(temporary_inputs[0].exists())
         self.assertTrue(output_path.is_file())
@@ -777,9 +845,9 @@ Metadata Stream: yes
             markdown_bytes,
         )
 
-        self.assertEqual(replaced_rules, 2)
+        self.assertEqual(replaced_rules, 3)
         self.assertTrue(prepared_markdown.startswith(b'---\ntitle: Book\n---\n'))
-        self.assertIn(b'\n***\n![[cover.jpg]]', prepared_markdown)
+        self.assertIn(b'\n***\n![](<cover.jpg>)', prepared_markdown)
         self.assertIn(b'```markdown\n---\n![[example.jpg]]\n```', prepared_markdown)
 
         markdown_without_wikilinks = b'# Title\n\n---\n## Section\n'
@@ -797,6 +865,13 @@ Metadata Stream: yes
         self.assertEqual(unchanged_markdown, fenced_only)
         self.assertEqual(replaced_rules, 0)
 
+        unsupported_embed = b'![[attachment.pdf]]\n'
+        unchanged_markdown, modified_lines = convert._prepare_markdown_source(
+            unsupported_embed,
+        )
+        self.assertEqual(unchanged_markdown, unsupported_embed)
+        self.assertEqual(modified_lines, 0)
+
     def test_txt_epub_rewrites_horizontal_rule_before_obsidian_embed_in_temp_file(self):
         text_path = self.directory / 'Книга.txt'
         original_text = (
@@ -806,20 +881,20 @@ Metadata Stream: yes
         output_path = self.directory / 'Книга.epub'
         temporary_inputs = []
         commands = []
+        pandoc_input_content = []
+        expected_text = original_text.replace(
+            b'\n---\n',
+            b'\n***\n',
+        ).replace(
+            '![[Вставки/Изображение.png]]'.encode('utf-8'),
+            '![](<Вставки/Изображение.png>)'.encode('utf-8'),
+        )
 
         def fake_run(command, **_kwargs):
             commands.append(command)
             input_path = Path(command[command.index('--output') - 1])
             temporary_inputs.append(input_path)
-            self.assertNotEqual(input_path, text_path)
-            self.assertEqual(
-                input_path.read_bytes(),
-                original_text.replace(b'\n---\n', b'\n***\n'),
-            )
-            self.assertIn(
-                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
-                command,
-            )
+            pandoc_input_content.append(input_path.read_bytes())
             Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
 
         with patch.object(sys, 'argv', [
@@ -837,6 +912,12 @@ Metadata Stream: yes
                     convert.main()
 
         self.assertEqual(len(commands), 1)
+        self.assertNotEqual(temporary_inputs[0], text_path)
+        self.assertEqual(pandoc_input_content[0], expected_text)
+        self.assertIn(
+            f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
         self.assertEqual(text_path.read_bytes(), original_text)
         self.assertFalse(temporary_inputs[0].exists())
         self.assertTrue(output_path.is_file())
@@ -1447,7 +1528,13 @@ Metadata Stream: yes
         extracted_pdf_text = (
             '# Заголовок\n\n---\n![[Вставки/Изображение.png]]\n\nТекст книги.\n'
         )
-        normalized_pdf_text = extracted_pdf_text.replace('\n---\n', '\n***\n')
+        normalized_pdf_text = extracted_pdf_text.replace(
+            '\n---\n',
+            '\n***\n',
+        ).replace(
+            '![[Вставки/Изображение.png]]',
+            '![](<Вставки/Изображение.png>)',
+        )
         cover_path = self.directory / 'Обложки' / 'PDF книга.jpg'
         cover_path.parent.mkdir()
         cover_path.write_bytes(b'cover image')

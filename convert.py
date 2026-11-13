@@ -268,6 +268,8 @@ def _find_cover_file(input_path, media_dir='.', media_dir_explicit=False, recurs
 MARKDOWN_HORIZONTAL_RULE_PATTERN = re.compile(rb'^ {0,3}---[ \t]*(\r?\n)?$')
 MARKDOWN_FENCE_PATTERN = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
 MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(rb'^ {0,3}(`+|~+)[ \t]*(?:\r?\n)?$')
+MARKDOWN_INLINE_CODE_PATTERN = re.compile(rb'(`+)(.*?)\1')
+OBSIDIAN_IMAGE_EMBED_PATTERN = re.compile(rb'!\[\[([^\]\r\n]+)\]\]')
 
 
 def _prepare_markdown_source(source_bytes):
@@ -281,7 +283,7 @@ def _prepare_markdown_source(source_bytes):
                     front_matter_end = index + 1
                     break
 
-    replace_indexes = []
+    modified_indexes = set()
     fence_marker = None
     for index in range(front_matter_end, len(lines)):
         line = lines[index]
@@ -301,14 +303,55 @@ def _prepare_markdown_source(source_bytes):
             continue
 
         if MARKDOWN_HORIZONTAL_RULE_PATTERN.fullmatch(line):
-            replace_indexes.append(index)
-    if not replace_indexes:
+            line = re.sub(rb'^( {0,3})---', rb'\1***', line, count=1)
+            modified_indexes.add(index)
+
+        updated_parts = []
+        cursor = 0
+        for code_span in MARKDOWN_INLINE_CODE_PATTERN.finditer(line):
+            text = line[cursor:code_span.start()]
+            updated_text, embed_count = _convert_obsidian_image_embeds(text)
+            updated_parts.extend((updated_text, code_span.group()))
+            if embed_count:
+                modified_indexes.add(index)
+            cursor = code_span.end()
+        text = line[cursor:]
+        updated_text, embed_count = _convert_obsidian_image_embeds(text)
+        updated_parts.append(updated_text)
+        if embed_count:
+            modified_indexes.add(index)
+        lines[index] = b''.join(updated_parts)
+
+    if not modified_indexes:
         return source_bytes, 0
 
-    for index in replace_indexes:
-        lines[index] = re.sub(rb'^( {0,3})---', rb'\1***', lines[index], count=1)
+    return b''.join(lines), len(modified_indexes)
 
-    return b''.join(lines), len(replace_indexes)
+
+def _convert_obsidian_image_embeds(text):
+    converted_count = 0
+
+    def replace_embed(match):
+        nonlocal converted_count
+        image_reference, separator, label = match.group(1).partition(b'|')
+        image_reference = image_reference.strip()
+        if Path(os.fsdecode(image_reference)).suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+            return match.group(0)
+
+        converted_count += 1
+        label = label.strip() if separator else b''
+        size = re.fullmatch(rb'(\d+)(?:x(\d+))?', label)
+        attributes = b''
+        if size:
+            dimensions = [b'width=' + size.group(1) + b'px']
+            if size.group(2):
+                dimensions.append(b'height=' + size.group(2) + b'px')
+            attributes = b'{' + b' '.join(dimensions) + b'}'
+            label = b''
+
+        return b'![' + label + b'](<' + image_reference + b'>)' + attributes
+
+    return OBSIDIAN_IMAGE_EMBED_PATTERN.sub(replace_embed, text), converted_count
 
 SUPPORTED_EPUB_MEDIA_TYPES = {
     '.mp3': ('audio', 'audio/mpeg'),
