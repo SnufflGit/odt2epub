@@ -157,7 +157,7 @@ class PandocFormatTests(unittest.TestCase):
             self.assertIn('href="chapter1.xhtml"', nav)
 
     def test_add_audio_and_video_media_to_epub(self):
-        epub_path = self.directory / 'Книга.epub'
+        epub_path = self.directory / 'EPUB.epub'
         media_directory = self.directory / 'Медиа'
         media_directory.mkdir()
         audio_path = media_directory / 'Аудио.mp3'
@@ -575,6 +575,31 @@ Metadata Stream: yes
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     convert.main()
         return commands, stdout.getvalue(), stderr.getvalue()
+
+    def write_odt_with_images(self, output_path, image_count=0):
+        office_ns = 'urn:oasis:names:tc:opendocument:xmlns:office:1.0'
+        text_ns = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
+        draw_ns = 'urn:oasis:names:tc:opendocument:xmlns:drawing:1.0'
+        xlink_ns = 'http://www.w3.org/1999/xlink'
+        content = (
+            f'<office:document-content xmlns:office="{office_ns}" '
+            f'xmlns:text="{text_ns}" xmlns:draw="{draw_ns}" '
+            f'xmlns:xlink="{xlink_ns}">'
+            '<office:automatic-styles/><office:body><office:text>'
+            + ''.join(
+                f'<text:p><draw:frame><draw:image '
+                f'xlink:href="image{index}.png"/></draw:frame></text:p>'
+                for index in range(image_count)
+            )
+            + '</office:text></office:body></office:document-content>'
+        )
+        with zipfile.ZipFile(output_path, 'w') as archive:
+            archive.writestr(
+                'mimetype',
+                'application/vnd.oasis.opendocument.text',
+                compress_type=zipfile.ZIP_STORED,
+            )
+            archive.writestr('content.xml', content)
 
     def test_formats_use_expected_pandoc_writer_and_extension(self):
         for output_format, pandoc_writer in (
@@ -1244,6 +1269,107 @@ Metadata Stream: yes
                     self.assertEqual(output_path, self.directory / f'{input_path.stem}.{output_format}')
                     self.assertTrue(output_path.is_file())
 
+    def test_epub_input_can_be_converted_to_pdf(self):
+        epub_path = self.directory / 'Source EPUB.epub'
+        epub_path.write_bytes(self.epub_bytes)
+        commands, _, stderr = self.run_conversion(
+            'pdf',
+            input_path=epub_path,
+        )
+
+        self.assertEqual(stderr, '')
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--from=epub', commands[0])
+        self.assertIn('--to=pdf', commands[0])
+        self.assertIn('--pdf-engine=xelatex', commands[0])
+        self.assertIn('mainfont=DejaVu Serif', commands[0])
+        self.assertEqual(
+            Path(commands[0][commands[0].index('--output') + 1]),
+            epub_path.with_suffix('.pdf'),
+        )
+
+    def test_markdown_and_epub_inputs_can_be_converted_to_txt(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Заголовок\n\nТекст книги.\n', encoding='utf-8')
+        epub_path = self.directory / 'EPUB.epub'
+        epub_path.write_bytes(self.epub_bytes)
+
+        for input_path, source_format in (
+            (markdown_path, 'markdown'),
+            (epub_path, 'epub'),
+        ):
+            with self.subTest(input_path=input_path.name):
+                commands, _, stderr = self.run_conversion(
+                    'txt',
+                    input_path=input_path,
+                )
+                self.assertEqual(stderr, '')
+                self.assertEqual(len(commands), 1)
+                self.assertIn(f'--from={source_format}', commands[0])
+                self.assertIn('--to=plain', commands[0])
+                output_path = Path(
+                    commands[0][commands[0].index('--output') + 1]
+                )
+                self.assertEqual(output_path, input_path.with_suffix('.txt'))
+                self.assertTrue(output_path.is_file())
+
+    def test_text_input_can_be_converted_to_markdown(self):
+        text_path = self.directory / 'Plain source.txt'
+        text_path.write_text('Plain text\n', encoding='utf-8')
+        commands, _, stderr = self.run_conversion(
+            'md',
+            input_path=text_path,
+        )
+
+        self.assertEqual(stderr, '')
+        self.assertEqual(len(commands), 1)
+        self.assertIn('--from=markdown', commands[0])
+        self.assertIn('--to=markdown', commands[0])
+        self.assertEqual(
+            Path(commands[0][commands[0].index('--output') + 1]),
+            text_path.with_suffix('.md'),
+        )
+
+    def test_txt_directory_scan_accepts_markdown_and_epub_sources(self):
+        input_directory = self.directory / 'Books'
+        input_directory.mkdir()
+        markdown_path = input_directory / 'Markdown.md'
+        epub_path = input_directory / 'EPUB.epub'
+        markdown_path.write_text('# Markdown\n', encoding='utf-8')
+        epub_path.write_bytes(self.epub_bytes)
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(b'text')
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(input_directory),
+            '--format',
+            'txt',
+            '--input-formats',
+            'md,epub',
+            '--no-timestamp',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        converted_sources = {
+            Path(command[command.index('--output') - 1])
+            for command in commands
+        }
+        self.assertEqual(converted_sources, {markdown_path, epub_path})
+        self.assertEqual(
+            {
+                next(argument.split('=', 1)[1] for argument in command
+                     if argument.startswith('--from='))
+                for command in commands
+            },
+            {'markdown', 'epub'},
+        )
+
     def test_txt_epub_uses_same_name_cover_from_media_subdirectory(self):
         text_path = self.directory / 'Книга.txt'
         text_path.write_text('Текст книги.\n', encoding='utf-8')
@@ -1474,6 +1600,68 @@ Metadata Stream: yes
         self.assertTrue(output_path.is_file())
         self.assertEqual(stdout.getvalue().strip(), 'Фотоальбом — Результат.epub — УСПЕШНО')
 
+    def test_image_folder_creates_pdf_with_one_image_per_page(self):
+        image_directory = self.directory / 'Фотоальбом'
+        image_directory.mkdir()
+        (image_directory / 'page10.png').write_bytes(b'image 10')
+        (image_directory / 'page2.png').write_bytes(b'image 2')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            markdown_path = Path(command[command.index('--output') - 1])
+            markdown = markdown_path.read_text(encoding='utf-8')
+            self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
+            self.assertEqual(markdown.count('\\newpage'), 1)
+            self.assertIn(f'--resource-path={image_directory}', command)
+            self.assertIn('--to=pdf', command)
+            self.assertIn('--pdf-engine=xelatex', command)
+            self.assertIn('mainfont=DejaVu Serif', command)
+            Path(command[command.index('--output') + 1]).write_bytes(b'%PDF')
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(image_directory),
+            '--format',
+            'pdf',
+            '--input-formats',
+            'images',
+            '--no-timestamp',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertTrue((self.directory / 'Фотоальбом.pdf').is_file())
+
+    def test_image_folder_pdf_reports_missing_xelatex_before_pandoc(self):
+        image_directory = self.directory / 'Pictures'
+        image_directory.mkdir()
+        (image_directory / 'page1.png').write_bytes(b'image')
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(image_directory),
+            '--format',
+            'pdf',
+            '--input-formats',
+            'images',
+            '--mode',
+            'quiet',
+            '--no-timestamp',
+        ]):
+            with patch('convert.shutil.which', return_value=None):
+                with patch(
+                    'convert.subprocess.run',
+                    side_effect=AssertionError('Pandoc should not run without XeLaTeX'),
+                ):
+                    with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                        convert.main()
+
+        self.assertIn('xelatex не найден', stderr.getvalue())
+
     def test_input_formats_filter_directory_scan(self):
         input_directory = self.directory / 'Books'
         input_directory.mkdir()
@@ -1657,14 +1845,14 @@ Metadata Stream: yes
     def test_input_formats_reject_incompatible_source_output_pair(self):
         stderr = io.StringIO()
         with patch.object(sys, 'argv', [
-            'convert.py', '--format', 'pdf', '--input-formats', 'images',
+            'convert.py', '--format', 'md', '--input-formats', 'images',
         ]):
             with redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as exit_context:
                     convert.main()
 
         self.assertEqual(exit_context.exception.code, 2)
-        self.assertIn('нельзя преобразовать в pdf', stderr.getvalue())
+        self.assertIn('нельзя преобразовать в md', stderr.getvalue())
 
     def test_image_folder_respects_no_recursive(self):
         image_directory = self.directory / 'Pictures'
@@ -1781,6 +1969,261 @@ Metadata Stream: yes
         self.assertTrue((self.directory / 'PDF книга.epub').is_file())
         self.assertFalse(temporary_inputs[0].exists())
         self.assertIn('Извлечение текста из PDF', stdout.getvalue())
+
+    def test_pdf_input_is_extracted_and_converted_to_txt(self):
+        pdf_path = self.directory / 'PDF книга.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        extracted_text = 'Заголовок\n\nТекст книги.\n'
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[0] == 'pdftotext':
+                Path(command[-1]).write_text(extracted_text, encoding='utf-8')
+                return
+
+            pandoc_input = Path(command[command.index('--output') - 1])
+            self.assertEqual(pandoc_input.read_text(encoding='utf-8'), extracted_text)
+            self.assertIn('--from=markdown', command)
+            self.assertIn('--to=plain', command)
+            Path(command[command.index('--output') + 1]).write_text(
+                extracted_text,
+                encoding='utf-8',
+            )
+
+        _, stdout, stderr = self.run_conversion(
+            'txt',
+            input_path=pdf_path,
+            run_side_effect=fake_run,
+        )
+
+        self.assertEqual(stderr, '')
+        self.assertEqual([command[0] for command in commands], ['pdftotext', 'pandoc'])
+        self.assertEqual(
+            Path(commands[1][commands[1].index('--output') + 1]),
+            self.directory / 'PDF книга.txt',
+        )
+        self.assertTrue((self.directory / 'PDF книга.txt').is_file())
+        self.assertIn('Создание TXT из текста PDF', stdout)
+
+    def test_scanned_pdf_cannot_be_converted_to_txt_without_ocr(self):
+        pdf_path = self.directory / 'Скан.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[-1]).write_text('\n \n', encoding='utf-8')
+
+        _, _, stderr = self.run_conversion(
+            'txt',
+            input_path=pdf_path,
+            run_side_effect=fake_run,
+        )
+
+        self.assertEqual([command[0] for command in commands], ['pdftotext'])
+        self.assertIn('Текстовый слой PDF не найден', stderr)
+        self.assertFalse((self.directory / 'Скан.txt').exists())
+
+    def test_pdf_and_epub_inputs_can_be_converted_to_markdown(self):
+        pdf_path = self.directory / 'Extracted.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        epub_path = self.directory / 'Source.epub'
+        epub_path.write_bytes(self.epub_bytes)
+
+        for input_path, source_format in (
+            (pdf_path, 'markdown'),
+            (epub_path, 'epub'),
+        ):
+            with self.subTest(input_path=input_path.name):
+                commands = []
+
+                def fake_run(command, **_kwargs):
+                    commands.append(command)
+                    if command[0] == 'pdftotext':
+                        Path(command[-1]).write_text(
+                            'Extracted text\n',
+                            encoding='utf-8',
+                        )
+                    else:
+                        self.assertIn(f'--from={source_format}', command)
+                        self.assertIn('--to=markdown', command)
+                        Path(command[command.index('--output') + 1]).write_text(
+                            '# Markdown\n',
+                            encoding='utf-8',
+                        )
+
+                _, _, stderr = self.run_conversion(
+                    'md',
+                    input_path=input_path,
+                    run_side_effect=fake_run,
+                )
+
+                self.assertEqual(stderr, '')
+                self.assertIn(f'--from={source_format}', commands[-1])
+                self.assertIn('--to=markdown', commands[-1])
+                self.assertTrue(input_path.with_suffix('.md').is_file())
+
+    def test_scanned_pdf_cannot_be_converted_to_markdown_without_ocr(self):
+        pdf_path = self.directory / 'Scanned.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[-1]).write_text('\n \n', encoding='utf-8')
+
+        _, _, stderr = self.run_conversion(
+            'md',
+            input_path=pdf_path,
+            run_side_effect=fake_run,
+        )
+
+        self.assertEqual([command[0] for command in commands], ['pdftotext'])
+        self.assertIn('Текстовый слой PDF не найден', stderr)
+        self.assertFalse(pdf_path.with_suffix('.md').exists())
+
+    def test_markdown_text_pdf_and_epub_inputs_can_be_converted_to_odt(self):
+        markdown_path = self.directory / 'Markdown.md'
+        markdown_path.write_text('# Markdown\n', encoding='utf-8')
+        text_path = self.directory / 'Plain.txt'
+        text_path.write_text('Текст\n', encoding='utf-8')
+        pdf_path = self.directory / 'Source PDF.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        epub_path = self.directory / 'Source EPUB.epub'
+        epub_path.write_bytes(self.epub_bytes)
+
+        for input_path, source_format in (
+            (markdown_path, 'markdown'),
+            (text_path, 'markdown'),
+            (pdf_path, 'markdown'),
+            (epub_path, 'epub'),
+        ):
+            with self.subTest(input_path=input_path.name):
+                commands = []
+
+                def fake_run(command, **_kwargs):
+                    commands.append(command)
+                    if command[0] == 'pdftotext':
+                        Path(command[-1]).write_text('Текст PDF\n', encoding='utf-8')
+                    else:
+                        Path(command[command.index('--output') + 1]).write_bytes(b'odt')
+
+                _, _, stderr = self.run_conversion(
+                    'odt',
+                    input_path=input_path,
+                    run_side_effect=fake_run,
+                )
+
+                self.assertEqual(stderr, '')
+                pandoc_command = commands[-1]
+                self.assertEqual(pandoc_command[0], 'pandoc')
+                self.assertIn(f'--from={source_format}', pandoc_command)
+                self.assertIn('--to=odt', pandoc_command)
+                self.assertEqual(
+                    Path(pandoc_command[pandoc_command.index('--output') + 1]),
+                    input_path.with_suffix('.odt'),
+                )
+
+    def test_scanned_pdf_pages_are_added_to_odt_with_page_breaks(self):
+        pdf_path = self.directory / 'Скан.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[0] == 'pdftotext':
+                Path(command[-1]).write_bytes(b'\n \n')
+            elif command[0] == 'pdftoppm':
+                prefix = command[-1]
+                Path(f'{prefix}-1.png').write_bytes(b'page 1')
+                Path(f'{prefix}-2.png').write_bytes(b'page 2')
+            else:
+                markdown_path = Path(command[command.index('--output') - 1])
+                markdown = markdown_path.read_text(encoding='utf-8')
+                self.assertIn('Страница 1', markdown)
+                self.assertIn('Страница 2', markdown)
+                self.assertIn('--to=odt', command)
+                self.write_odt_with_images(
+                    command[command.index('--output') + 1],
+                    image_count=2,
+                )
+
+        _, _, stderr = self.run_conversion(
+            'odt',
+            input_path=pdf_path,
+            run_side_effect=fake_run,
+        )
+
+        self.assertEqual(stderr, '')
+        output_path = self.directory / 'Скан.odt'
+        with zipfile.ZipFile(output_path) as archive:
+            content = ET.fromstring(archive.read('content.xml'))
+        ns = {
+            'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0',
+            'style': 'urn:oasis:names:tc:opendocument:xmlns:style:1.0',
+            'fo': 'urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0',
+        }
+        image_paragraphs = content.findall('.//text:p', ns)
+        self.assertEqual(len(image_paragraphs), 2)
+        page_break_style = image_paragraphs[1].get(
+            f'{{{ns["text"]}}}style-name'
+        )
+        self.assertIsNotNone(page_break_style)
+        self.assertEqual(
+            content.find(
+                f'.//style:style[@style:name="{page_break_style}"]/'
+                'style:paragraph-properties',
+                ns,
+            ).get(f'{{{ns["fo"]}}}break-before'),
+            'page',
+        )
+
+    def test_image_folder_can_be_converted_to_odt_with_page_breaks(self):
+        image_directory = self.directory / 'Фотоальбом'
+        image_directory.mkdir()
+        (image_directory / 'page10.png').write_bytes(b'image 10')
+        (image_directory / 'page2.png').write_bytes(b'image 2')
+        output_path = self.directory / 'Фотоальбом.odt'
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            markdown_path = Path(command[command.index('--output') - 1])
+            markdown = markdown_path.read_text(encoding='utf-8')
+            self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
+            self.assertIn(f'--resource-path={image_directory}', command)
+            self.assertIn('--to=odt', command)
+            self.write_odt_with_images(
+                command[command.index('--output') + 1],
+                image_count=2,
+            )
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(image_directory),
+            '--format',
+            'odt',
+            '--input-formats',
+            'images',
+            '--no-timestamp',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(output_path.is_file())
+        with zipfile.ZipFile(output_path) as archive:
+            content = ET.fromstring(archive.read('content.xml'))
+        paragraphs = content.findall(
+            './/text:p',
+            {'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'},
+        )
+        self.assertEqual(len(paragraphs), 2)
+        self.assertIsNotNone(paragraphs[1].get(
+            '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}style-name'
+        ))
 
     def test_pdf_directory_scan_includes_pdf_for_epub_output(self):
         books = self.directory / 'books'

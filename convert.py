@@ -2110,6 +2110,7 @@ def main():
         'markdown': 'md',
         'txt': 'txt',
         'pdf': 'pdf',
+        'epub': 'epub',
         'image': 'images',
         'images': 'images',
     }
@@ -2133,15 +2134,16 @@ def main():
         return identifier
 
     source_format_outputs = {
-        'odt': {'epub', 'md', 'pdf', 'txt'},
-        'md': {'epub', 'md', 'pdf'},
-        'txt': {'epub', 'pdf', 'txt'},
-        'pdf': {'epub', 'pdf'},
-        'images': {'epub'},
+        'odt': {'odt', 'epub', 'md', 'pdf', 'txt'},
+        'md': {'odt', 'epub', 'md', 'pdf', 'txt'},
+        'txt': {'odt', 'epub', 'md', 'pdf', 'txt'},
+        'pdf': {'odt', 'epub', 'md', 'pdf', 'txt'},
+        'epub': {'odt', 'epub', 'md', 'pdf', 'txt'},
+        'images': {'odt', 'epub', 'pdf'},
     }
 
     parser = argparse.ArgumentParser(
-        description='Конвертация ODT в EPUB, Markdown, PDF или TXT; Markdown/TXT/PDF и папок с изображениями — в EPUB',
+        description='Конвертация документов ODT, Markdown, TXT, PDF и EPUB в поддерживаемые форматы; папок с изображениями — в EPUB, ODT или PDF',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Примеры:
@@ -2161,15 +2163,15 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     )
 
     parser.add_argument('paths', nargs='*', help='Пути к файлам или директориям (если не указаны, обрабатывается текущая директория)')
-    output_format_choices = ('epub', 'md', 'pdf', 'txt')
+    output_format_choices = ('odt', 'epub', 'md', 'pdf', 'txt')
     parser.add_argument('--format', choices=output_format_choices, default=None,
-                        help='Формат результата: epub, md, pdf или txt; если не указан, определяется по расширению -o (иначе epub)')
+                        help='Формат результата: odt, epub, md, pdf или txt; если не указан, определяется по расширению -o (иначе epub)')
     parser.add_argument(
         '--input-formats',
         action='append',
         type=parse_input_formats,
         metavar='LIST',
-        help='Фильтр форматов при поиске в папках, например odt,md,txt; можно указывать несколько раз. Допустимо: odt, md/markdown, txt, pdf, images',
+        help='Фильтр форматов при поиске в папках, например odt,md,txt; можно указывать несколько раз. Допустимо: odt, md/markdown, txt, pdf, epub, images',
     )
     parser.add_argument('--mode', choices=('quiet', 'summary', 'verbose'), default='verbose',
                         help='Режим вывода: quiet — только критические ошибки, summary — строка результата по файлу, verbose — подробный вывод')
@@ -2539,6 +2541,93 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             path_identity_keys(second_path)
         )
 
+    def add_page_breaks_to_odt(output_path):
+        office_ns = 'urn:oasis:names:tc:opendocument:xmlns:office:1.0'
+        text_ns = 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'
+        style_ns = 'urn:oasis:names:tc:opendocument:xmlns:style:1.0'
+        fo_ns = 'urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0'
+        draw_ns = 'urn:oasis:names:tc:opendocument:xmlns:drawing:1.0'
+        namespaces = {
+            'office': office_ns,
+            'text': text_ns,
+            'style': style_ns,
+            'draw': draw_ns,
+        }
+        output_path = Path(output_path)
+        with zipfile.ZipFile(output_path, 'r') as source_archive:
+            entries = [
+                (entry, source_archive.read(entry.filename))
+                for entry in source_archive.infolist()
+            ]
+
+        content_index = next(
+            (index for index, (entry, _) in enumerate(entries)
+             if entry.filename == 'content.xml'),
+            None,
+        )
+        if content_index is None:
+            raise KeyError('В ODT отсутствует content.xml')
+
+        content = ET.fromstring(entries[content_index][1])
+        automatic_styles = content.find('office:automatic-styles', namespaces)
+        if automatic_styles is None:
+            raise ValueError('В ODT отсутствуют автоматические стили')
+
+        image_paragraphs = [
+            paragraph
+            for paragraph in content.findall('.//text:p', namespaces)
+            if paragraph.find('.//draw:image', namespaces) is not None
+        ]
+        if len(image_paragraphs) < 2:
+            return
+
+        style_name = 'Odt2epubPageBreak'
+        existing_names = {
+            style.get(f'{{{style_ns}}}name')
+            for style in automatic_styles.findall('style:style', namespaces)
+        }
+        suffix = 1
+        while style_name in existing_names:
+            style_name = f'Odt2epubPageBreak{suffix}'
+            suffix += 1
+
+        paragraph_style = ET.SubElement(
+            automatic_styles,
+            f'{{{style_ns}}}style',
+            {
+                f'{{{style_ns}}}name': style_name,
+                f'{{{style_ns}}}family': 'paragraph',
+            },
+        )
+        ET.SubElement(
+            paragraph_style,
+            f'{{{style_ns}}}paragraph-properties',
+            {f'{{{fo_ns}}}break-before': 'page'},
+        )
+        for paragraph in image_paragraphs[1:]:
+            paragraph.set(f'{{{text_ns}}}style-name', style_name)
+
+        entries[content_index] = (
+            entries[content_index][0],
+            ET.tostring(content, encoding='utf-8', xml_declaration=True),
+        )
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=output_path.parent,
+                prefix=f'.{output_path.name}.',
+                suffix='.tmp',
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+            with zipfile.ZipFile(temporary_path, 'w') as destination_archive:
+                for entry, data in entries:
+                    destination_archive.writestr(entry, data)
+            os.replace(temporary_path, output_path)
+        finally:
+            if temporary_path and temporary_path.exists():
+                temporary_path.unlink()
+
     # Обработка одного файла
     def process_single_file(input_path, explicit_cover=None, explicit_output=None, explicit_title=None, explicit_author=None, explicit_lang='', media_dir='.', media_recursive=True, result_info=None):
         """Обрабатывает один входной файл. Возвращает True при успехе."""
@@ -2568,10 +2657,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         is_markdown = input_extension == '.md'
         is_plain_text = input_extension == '.txt'
         is_pdf = input_extension == '.pdf'
+        is_epub = input_extension == '.epub'
         is_text_source = is_markdown or is_plain_text
-        if args.format in ('md', 'pdf', 'txt') or is_text_source or is_pdf:
-            pandoc_formats = {'md': 'markdown', 'pdf': 'pdf', 'txt': 'plain', 'epub': 'epub'}
-            format_names = {'md': 'Markdown', 'pdf': 'PDF', 'txt': 'TXT', 'epub': 'EPUB'}
+        needs_odt_page_breaks = False
+        if args.format in ('md', 'pdf', 'txt', 'odt') or is_text_source or is_pdf or is_epub:
+            pandoc_formats = {'odt': 'odt', 'md': 'markdown', 'pdf': 'pdf', 'txt': 'plain', 'epub': 'epub'}
+            format_names = {'odt': 'ODT', 'md': 'Markdown', 'pdf': 'PDF', 'txt': 'TXT', 'epub': 'EPUB'}
             if explicit_output:
                 output_path = os.path.abspath(explicit_output)
             else:
@@ -2588,8 +2679,18 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 result_info['output_path'] = output_path
             if not allow_output_write(output_path, result_info):
                 return False
-            source_format = 'markdown' if is_text_source or is_pdf else 'odt'
-            source_name = 'PDF' if is_pdf else 'Markdown' if is_markdown else 'TXT' if is_plain_text else 'ODT'
+            source_format = (
+                'markdown' if is_text_source or is_pdf
+                else 'epub' if is_epub
+                else 'odt'
+            )
+            source_name = (
+                'PDF' if is_pdf
+                else 'EPUB' if is_epub
+                else 'Markdown' if is_markdown
+                else 'TXT' if is_plain_text
+                else 'ODT'
+            )
             if not is_pdf:
                 log_step('1/1', f'Конвертация {source_name} в {format_names[args.format]} с Pandoc...')
             pdf_metadata = {}
@@ -2740,9 +2841,23 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                                 return False
                         else:
                             pandoc_input_path = extracted_text_path
-                        log_step('2/2', 'Создание EPUB из текста PDF с помощью Pandoc...')
+                        log_step(
+                            '2/2',
+                            f'Создание {format_names[args.format]} из текста PDF '
+                            'с помощью Pandoc...',
+                        )
+                    elif args.format in ('md', 'txt'):
+                        output_name = 'Markdown' if args.format == 'md' else 'TXT'
+                        log_error(
+                            'Текстовый слой PDF не найден; конвертация в '
+                            f'{output_name} невозможна без OCR.'
+                        )
+                        return False
                     else:
-                        log('Текстовый слой не найден; страницы PDF будут добавлены в EPUB как изображения.')
+                        log(
+                            'Текстовый слой не найден; страницы PDF будут добавлены '
+                            f'в {format_names[args.format]} как изображения.'
+                        )
                         log_step('2/3', 'Рендеринг страниц PDF в изображения с помощью pdftoppm...')
                         image_prefix = Path(temp_dir) / 'page'
                         try:
@@ -2784,14 +2899,19 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                             return False
 
                         pandoc_command.append(f'--resource-path={temp_dir}')
-                        log_step('3/3', 'Создание EPUB из изображений страниц с помощью Pandoc...')
+                        log_step(
+                            '3/3',
+                            f'Создание {format_names[args.format]} из изображений '
+                            'страниц с помощью Pandoc...',
+                        )
+                        needs_odt_page_breaks = args.format == 'odt'
 
                     pandoc_command.extend([str(pandoc_input_path), '--output', output_path])
                     if not run_pandoc(pandoc_command):
                         return False
             else:
                 pandoc_input_path = input_path
-                if is_text_source and args.format in ('epub', 'pdf'):
+                if is_text_source and args.format in ('epub', 'pdf', 'odt'):
                     try:
                         source_bytes = Path(input_path).read_bytes()
                     except OSError as e:
@@ -2838,6 +2958,13 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     pandoc_command.extend([pandoc_input_path, '--output', output_path])
                     if not run_pandoc(pandoc_command):
                         return False
+
+            if needs_odt_page_breaks:
+                try:
+                    add_page_breaks_to_odt(output_path)
+                except (OSError, ET.ParseError, zipfile.BadZipFile, KeyError, ValueError) as e:
+                    log_error(f'Не удалось добавить разрывы страниц в ODT: {e}')
+                    return False
 
             if args.format == 'epub':
                 if is_text_source:
@@ -3028,7 +3155,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
 
     def process_image_folder(directory_path, image_paths, explicit_output=None, result_info=None,
                              media_dir='.', media_recursive=True):
-        """Создаёт EPUB, в котором каждое изображение является отдельной страницей."""
+        """Создаёт EPUB или ODT, в котором каждое изображение является отдельной страницей."""
         if result_info is None:
             result_info = {}
         result_info['output_path'] = None
@@ -3038,7 +3165,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         output_path = (
             os.path.abspath(explicit_output)
             if explicit_output
-            else str(directory.parent / f'{directory.name or "Images"}.epub')
+            else str(directory.parent / f'{directory.name or "Images"}.{args.format}')
         )
         if not explicit_output and not args.no_timestamp:
             output_path = str(_append_timestamp_suffix(output_path))
@@ -3058,16 +3185,22 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 for part in re.split(r'(\d+)', Path(image_path).relative_to(directory).as_posix())
             ],
         )
-        markdown = '\n\n'.join(
+        image_blocks = [
             (
                 f'## Страница {index}\n\n'
-                if args.toc
+                if args.toc and args.format == 'epub'
                 else ''
             )
             + f'![Страница {index}](<{Path(image_path).relative_to(directory).as_posix()}>)'
             for index, image_path in enumerate(image_paths, start=1)
-        ) + '\n'
+        ]
+        if args.format == 'pdf':
+            markdown = '\n\n\\newpage\n\n'.join(image_blocks) + '\n'
+        else:
+            markdown = '\n\n'.join(image_blocks) + '\n'
 
+        format_names = {'epub': 'EPUB', 'odt': 'ODT', 'pdf': 'PDF'}
+        format_name = format_names[args.format]
         try:
             with tempfile.TemporaryDirectory(prefix='odt2epub-images-') as temp_dir:
                 markdown_path = Path(temp_dir) / 'images.md'
@@ -3076,18 +3209,32 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 pandoc_command = [
                     'pandoc',
                     '--from=markdown',
-                    '--to=epub',
+                    f'--to={args.format}',
                     '-M',
                     f'title={title}',
                     '-M',
                     f'lang={args.lang or "ru"}',
                 ]
                 pandoc_command.extend(['-M', f'author={args.author or DEFAULT_AUTHOR}'])
-                if args.css:
+                if args.format == 'pdf':
+                    if shutil.which(PDF_ENGINE) is None:
+                        log_error(
+                            'xelatex не найден. Установите TeX Live '
+                            '(например, пакеты texlive-xetex, '
+                            'texlive-latex-recommended и fonts-dejavu-core) '
+                            'для создания PDF с поддержкой Unicode.'
+                        )
+                        return False
+                    pandoc_command.extend([
+                        f'--pdf-engine={PDF_ENGINE}',
+                        '-V',
+                        'mainfont=DejaVu Serif',
+                    ])
+                if args.css and args.format == 'epub':
                     pandoc_command.extend(['--css', args.css])
-                if args.toc:
+                if args.toc and args.format == 'epub':
                     pandoc_command.append('--toc')
-                if args.cover:
+                if args.cover and args.format == 'epub':
                     cover_path = os.path.abspath(args.cover)
                     if not os.path.isfile(cover_path):
                         log_error(f'Файл обложки не найден: {cover_path}')
@@ -3100,7 +3247,10 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     output_path,
                 ])
 
-                log_step('1/1', f'Создание EPUB из {len(image_paths)} изображений...')
+                log_step(
+                    '1/1',
+                    f'Создание {format_name} из {len(image_paths)} изображений...',
+                )
                 try:
                     subprocess.run(
                         pandoc_command,
@@ -3110,7 +3260,10 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         universal_newlines=True,
                     )
                 except FileNotFoundError:
-                    log_error('Pandoc не найден. Установите Pandoc и добавьте его в PATH для создания EPUB из изображений.')
+                    log_error(
+                        f'Pandoc не найден. Установите Pandoc и добавьте его в PATH '
+                        f'для создания {format_name} из изображений.'
+                    )
                     return False
                 except subprocess.CalledProcessError as e:
                     error = e.stderr.strip() or str(e)
@@ -3120,13 +3273,23 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     log_error(f'Ошибка запуска Pandoc: {e}')
                     return False
         except OSError as e:
-            log_error(f'Ошибка подготовки изображений для EPUB: {e}')
+            log_error(f'Ошибка подготовки изображений для {format_name}: {e}')
             return False
 
-        if not attach_epub_media(output_path, media_dir, media_recursive):
+        if args.format == 'odt':
+            try:
+                add_page_breaks_to_odt(output_path)
+            except (OSError, ET.ParseError, zipfile.BadZipFile, KeyError, ValueError) as e:
+                log_error(f'Не удалось добавить разрывы страниц в ODT: {e}')
+                return False
+        elif args.format == 'epub' and not attach_epub_media(
+            output_path,
+            media_dir,
+            media_recursive,
+        ):
             return False
 
-        log_ok(f'EPUB сохранён: {output_path}')
+        log_ok(f'{format_name} сохранён: {output_path}')
         return True
 
     # Обработка директории
@@ -3271,14 +3434,14 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 source_name = source_path.name if image_folder else source_path.stem
                 if not source_name:
                     source_name = 'Images'
-                output_extension = '.epub' if image_folder else f'.{args.format}'
+                output_extension = f'.{args.format}'
                 output_path = requested_output / f'{source_name}{output_extension}'
             elif total_inputs == 1:
                 output_path = requested_output
 
         if output_path is None:
             if image_folder:
-                output_path = source_directory.parent / f'{source_directory.name or "Images"}.epub'
+                output_path = source_directory.parent / f'{source_directory.name or "Images"}.{args.format}'
             else:
                 output_path = source_path.with_suffix(f'.{args.format}')
 
