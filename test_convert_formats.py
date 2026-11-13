@@ -834,6 +834,55 @@ Metadata Stream: yes
         self.assertFalse(temporary_inputs[0].exists())
         self.assertTrue(output_path.is_file())
 
+    def test_obsidian_image_path_resolves_from_vault_root(self):
+        vault_root = self.directory / 'vault'
+        markdown_directory = vault_root / 'Библия'
+        markdown_directory.mkdir(parents=True)
+        (vault_root / '.obsidian').mkdir()
+        image_path = markdown_directory / 'Media' / 'Картинка.jpg'
+        image_path.parent.mkdir()
+        image_path.write_bytes(b'image data')
+        markdown_path = markdown_directory / 'Глава.md'
+        markdown_path.write_text(
+            '![[Библия/Media/Картинка.jpg]]\n',
+            encoding='utf-8',
+        )
+        output_path = self.directory / 'Книга.epub'
+        commands = []
+        pandoc_input_content = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            pandoc_input_content.append(input_path.read_bytes())
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(
+            pandoc_input_content[0],
+            '![](<Библия/Media/Картинка.jpg>)\n'.encode('utf-8'),
+        )
+        self.assertIn(
+            f'--resource-path={markdown_directory}{os.pathsep}{vault_root}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
+        self.assertTrue(image_path.is_file())
+        self.assertTrue(output_path.is_file())
+
     def test_markdown_pdf_rewrite_preserves_front_matter_and_fenced_code(self):
         markdown_bytes = (
             b'---\ntitle: Book\n---\n'

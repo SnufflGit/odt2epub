@@ -353,6 +353,15 @@ def _convert_obsidian_image_embeds(text):
 
     return OBSIDIAN_IMAGE_EMBED_PATTERN.sub(replace_embed, text), converted_count
 
+
+def _find_obsidian_vault_root(source_path):
+    source_directory = Path(os.path.abspath(source_path)).parent
+    for directory in (source_directory, *source_directory.parents):
+        if (directory / '.obsidian').is_dir():
+            return directory
+    return None
+
+
 SUPPORTED_EPUB_MEDIA_TYPES = {
     '.mp3': ('audio', 'audio/mpeg'),
     '.m4a': ('audio', 'audio/mp4'),
@@ -2569,10 +2578,12 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                                     Path(temp_dir) / Path(input_path).name
                                 )
                                 Path(pandoc_input_path).write_bytes(source_bytes)
-                                resource_paths = dict.fromkeys((
-                                    str(Path(input_path).parent),
-                                    os.getcwd(),
-                                ))
+                                resource_paths = [str(Path(input_path).parent)]
+                                vault_root = _find_obsidian_vault_root(input_path)
+                                if vault_root:
+                                    resource_paths.append(str(vault_root))
+                                resource_paths.append(os.getcwd())
+                                resource_paths = dict.fromkeys(resource_paths)
                                 pandoc_command.append(
                                     f'--resource-path={os.pathsep.join(resource_paths)}'
                                 )
