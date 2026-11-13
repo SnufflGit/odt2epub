@@ -28,6 +28,7 @@ ODT/Markdown Converter
 
 import argparse
 import base64
+import importlib.util
 import os
 import sys
 import zipfile
@@ -38,7 +39,9 @@ import subprocess
 import tempfile
 import shutil
 import posixpath
+import zlib
 from datetime import datetime
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 from pathlib import Path, PurePosixPath
 from fnmatch import fnmatch
@@ -125,18 +128,154 @@ def log_warning(msg):
     write_file_log(warning_message)
 
 
-def warn_missing_external_utilities():
-    """Предупредить об отсутствующих внешних утилитах конвертации."""
+def check_dependencies():
+    """Проверить наличие внешних утилит и Python-пакетов."""
     utilities = {
-        'pandoc': 'часть маршрутов конвертации требует Pandoc',
-        PDF_ENGINE: 'создание PDF через Pandoc требует PDF-движок XeLaTeX',
-        'pdfinfo': 'извлечение встроенных метаданных из PDF требует Poppler',
-        'pdftotext': 'извлечение текста из PDF требует Poppler',
-        'pdftoppm': 'обработка сканированных PDF требует Poppler',
+        'pandoc': (
+            'часть маршрутов конвертации требует Pandoc',
+            'sudo apt install pandoc (или установите с pandoc.org)',
+        ),
+        PDF_ENGINE: (
+            'создание PDF через Pandoc требует PDF-движок XeLaTeX',
+            'sudo apt install texlive-xetex texlive-latex-recommended fonts-dejavu-core',
+        ),
+        'pdfinfo': (
+            'чтение метаданных PDF требует Poppler',
+            'sudo apt install poppler-utils',
+        ),
+        'pdftotext': (
+            'извлечение текста из PDF требует Poppler',
+            'sudo apt install poppler-utils',
+        ),
+        'pdftoppm': (
+            'обработка сканированных PDF требует Poppler',
+            'sudo apt install poppler-utils',
+        ),
+        'qpdf': (
+            'проверка целостности исходных PDF требует qpdf',
+            'sudo apt install qpdf',
+        ),
     }
-    for utility, purpose in utilities.items():
+    for utility, (purpose, install_command) in utilities.items():
         if shutil.which(utility) is None:
-            log_warning(f'{utility} не найден в PATH; {purpose}.')
+            log_warning(
+                f'{utility} не найден в PATH; {purpose}. '
+                f'Установка: {install_command}.'
+            )
+        else:
+            log_ok(f'{utility} найден в PATH.')
+
+    try:
+        pillow_installed = importlib.util.find_spec('PIL') is not None
+    except (ImportError, ValueError):
+        pillow_installed = False
+    if pillow_installed:
+        log_ok('Python-пакет Pillow установлен.')
+    else:
+        log_warning(
+            'Python-пакет Pillow не найден в текущем интерпретаторе. '
+            'Установите его командой: python -m pip install -r requirements.txt.'
+        )
+
+
+def _validate_zip_integrity(archive):
+    corrupt_member = archive.testzip()
+    if corrupt_member:
+        raise ValueError(f'ошибка CRC в элементе архива {corrupt_member}')
+
+
+def _require_mimetype(archive, expected_mimetype):
+    names = archive.namelist()
+    if not names or names[0] != 'mimetype':
+        raise ValueError('элемент mimetype отсутствует или не является первым')
+    mimetype_info = archive.getinfo('mimetype')
+    if mimetype_info.compress_type != zipfile.ZIP_STORED:
+        raise ValueError('элемент mimetype должен быть несжатым')
+    mimetype = archive.read('mimetype').decode('ascii').strip()
+    if mimetype != expected_mimetype:
+        raise ValueError(f'неверный mimetype: {mimetype!r}')
+    return set(names)
+
+
+def validate_odt_integrity(file_path):
+    with zipfile.ZipFile(file_path) as archive:
+        names = _require_mimetype(
+            archive,
+            'application/vnd.oasis.opendocument.text',
+        )
+        _validate_zip_integrity(archive)
+        if 'content.xml' not in names:
+            raise ValueError('обязательный файл content.xml отсутствует')
+
+        for xml_name in ('content.xml', 'styles.xml', 'meta.xml'):
+            if xml_name in names:
+                root = ET.fromstring(archive.read(xml_name))
+                if (
+                    xml_name == 'content.xml'
+                    and root.tag.rsplit('}', 1)[-1] != 'document-content'
+                ):
+                    raise ValueError('content.xml не является ODT-документом')
+
+
+def validate_epub_integrity(file_path):
+    with zipfile.ZipFile(file_path) as archive:
+        names = _require_mimetype(archive, 'application/epub+zip')
+        _validate_zip_integrity(archive)
+        if 'META-INF/container.xml' not in names:
+            raise ValueError('обязательный файл META-INF/container.xml отсутствует')
+
+        container = ET.fromstring(archive.read('META-INF/container.xml'))
+        if container.tag.rsplit('}', 1)[-1] != 'container':
+            raise ValueError('META-INF/container.xml имеет неверный корневой элемент')
+        package_paths = [
+            element.get('full-path')
+            for element in container.iter()
+            if element.tag.rsplit('}', 1)[-1] == 'rootfile'
+        ]
+        package_paths = [path for path in package_paths if path]
+        if not package_paths:
+            raise ValueError('в container.xml не найден корневой OPF-файл')
+
+        for package_path in package_paths:
+            package_path = unquote(urlsplit(package_path).path)
+            if package_path not in names:
+                raise ValueError(f'OPF-файл {package_path} отсутствует в архиве')
+            package = ET.fromstring(archive.read(package_path))
+            if package.tag.rsplit('}', 1)[-1] != 'package':
+                raise ValueError(f'{package_path} не является OPF-пакетом')
+
+            for element in package.iter():
+                if element.tag.rsplit('}', 1)[-1] != 'item':
+                    continue
+                href = element.get('href')
+                if not href:
+                    continue
+                parsed_href = urlsplit(href)
+                if parsed_href.scheme or parsed_href.netloc:
+                    continue
+                resource_path = posixpath.normpath(posixpath.join(
+                    posixpath.dirname(package_path),
+                    unquote(parsed_href.path),
+                ))
+                if resource_path not in names:
+                    raise ValueError(
+                        f'ресурс {href} из {package_path} отсутствует в архиве'
+                    )
+
+
+def validate_pdf_integrity(file_path):
+    if shutil.which('qpdf') is None:
+        raise RuntimeError(
+            'Для проверки целостности PDF установите qpdf '
+            'и добавьте его в PATH.'
+        )
+    subprocess.run(
+        ['qpdf', '--check', str(file_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
 
 
 def escape_html(text):
@@ -179,6 +318,50 @@ def get_image_mime_type(ext):
 
 # Поддерживаемые расширения изображений для обложек
 SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif')
+
+
+def validate_image_integrity(image_source, display_name):
+    """Проверить структуру и декодируемость изображения."""
+    extension = Path(display_name).suffix.lower()
+    if extension == '.svg':
+        try:
+            if isinstance(image_source, bytes):
+                root = ET.fromstring(image_source)
+            else:
+                root = ET.parse(image_source).getroot()
+        except (OSError, ET.ParseError) as e:
+            raise ValueError(f'{display_name}: {e}') from e
+        if root.tag not in ('svg', '{http://www.w3.org/2000/svg}svg'):
+            raise ValueError(f'{display_name}: корневой элемент SVG не найден')
+        return
+
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise RuntimeError(
+            'Для проверки целостности растровых изображений установите Pillow: '
+            'python -m pip install -r requirements.txt'
+        ) from e
+
+    def open_image():
+        source = io.BytesIO(image_source) if isinstance(image_source, bytes) else image_source
+        return Image.open(source)
+
+    try:
+        with open_image() as image:
+            image.verify()
+        with open_image() as image:
+            for frame_index in range(getattr(image, 'n_frames', 1)):
+                image.seek(frame_index)
+                image.load()
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        EOFError,
+        Image.DecompressionBombError,
+    ) as e:
+        raise ValueError(f'{display_name}: {e}') from e
 
 
 def _append_timestamp_suffix(output_path):
@@ -2308,7 +2491,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             sys.exit(1)
         LOG_FILE_PATH = log_file_path
 
-    warn_missing_external_utilities()
+    check_dependencies()
 
     compatible_source_formats = {
         source_format
@@ -2887,6 +3070,16 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                             log_error('pdftoppm не создал изображения страниц PDF.')
                             return False
 
+                        try:
+                            for page_image in page_images:
+                                validate_image_integrity(page_image, str(page_image))
+                        except RuntimeError as e:
+                            log_error(str(e))
+                            return False
+                        except ValueError as e:
+                            log_error(f'Повреждённое изображение страницы PDF: {e}')
+                            return False
+
                         pages_markdown = '\n\n'.join(
                             f'![Страница {index}]({page.name})'
                             for index, page in enumerate(page_images, start=1)
@@ -3411,6 +3604,122 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     total_inputs = len(all_files) + len(image_books)
     log(f'📂 Найдено источников для конвертации: {total_inputs}')
 
+    def preflight_source_integrity():
+        errors = []
+        for input_path in all_files:
+            extension = Path(input_path).suffix.lower()
+            if extension == f'.{args.format}':
+                continue
+            try:
+                if extension == '.odt':
+                    validate_odt_integrity(input_path)
+                elif extension == '.epub':
+                    validate_epub_integrity(input_path)
+                elif extension == '.pdf':
+                    validate_pdf_integrity(input_path)
+            except (
+                OSError,
+                ValueError,
+                RuntimeError,
+                ET.ParseError,
+                zipfile.BadZipFile,
+                subprocess.CalledProcessError,
+                zlib.error,
+                EOFError,
+            ) as e:
+                error = (
+                    getattr(e, 'stderr', '')
+                    or getattr(e, 'stdout', '')
+                    or str(e)
+                )
+                errors.append(f'{input_path}: {error.strip()}')
+
+        if errors:
+            for error in errors:
+                log_error(f'Ошибка проверки целостности исходника: {error}')
+            return False
+        return True
+
+    def preflight_image_integrity():
+        image_assets = []
+        for _directory, image_paths in image_books:
+            image_assets.extend(
+                (image_path, str(image_path))
+                for image_path in image_paths
+            )
+
+        if args.format == 'epub':
+            if args.cover:
+                cover_path = Path(os.path.abspath(args.cover))
+                if not cover_path.is_file():
+                    log_error(f'Файл обложки не найден: {cover_path}')
+                    return False
+                image_assets.append((cover_path, str(cover_path)))
+            else:
+                for input_path in all_files:
+                    if Path(input_path).suffix.lower() == '.epub':
+                        continue
+                    cover_path = _find_cover_file(
+                        input_path,
+                        media_dir=args.media_dir,
+                        media_dir_explicit=args.media_dir_explicit,
+                        recursive=not args.no_recursive,
+                    )
+                    if cover_path:
+                        image_assets.append((cover_path, str(cover_path)))
+
+        archive_errors = []
+        if args.format != 'odt':
+            for input_path in all_files:
+                if Path(input_path).suffix.lower() != '.odt':
+                    continue
+                if not zipfile.is_zipfile(input_path):
+                    continue
+                try:
+                    with zipfile.ZipFile(input_path) as archive:
+                        for image_name in archive.namelist():
+                            if not image_name.startswith('Pictures/') or image_name.endswith('/'):
+                                continue
+                            try:
+                                image_data = archive.read(image_name)
+                            except (OSError, RuntimeError, zipfile.BadZipFile, KeyError) as e:
+                                archive_errors.append(
+                                    f'{input_path}!/{image_name}: {e}'
+                                )
+                                continue
+                            image_assets.append(
+                                (image_data, f'{input_path}!/{image_name}')
+                            )
+                except (OSError, zipfile.BadZipFile) as e:
+                    archive_errors.append(f'{input_path}: не удалось прочитать ODT: {e}')
+
+        unique_assets = []
+        seen_assets = set()
+        for image_source, display_name in image_assets:
+            if isinstance(image_source, (str, Path)):
+                identity = ('path', os.path.normcase(os.path.realpath(image_source)))
+            else:
+                identity = ('embedded', display_name)
+            if identity not in seen_assets:
+                seen_assets.add(identity)
+                unique_assets.append((image_source, display_name))
+
+        errors = list(archive_errors)
+        for image_source, display_name in unique_assets:
+            try:
+                validate_image_integrity(image_source, display_name)
+            except RuntimeError as e:
+                log_error(str(e))
+                return False
+            except (OSError, ValueError, ET.ParseError) as e:
+                errors.append(str(e))
+
+        if errors:
+            for error in errors:
+                log_error(f'Повреждённое изображение: {error}')
+            return False
+        return True
+
     def output_for_source(source_path, image_folder=False):
         source_path = Path(source_path)
         source_directory = source_path if image_folder else source_path.parent
@@ -3521,6 +3830,9 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 f'расширение выходного файла .{output_suffix} не соответствует '
                 f'формату {args.format}'
             )
+
+    if not preflight_source_integrity() or not preflight_image_integrity():
+        sys.exit(1)
 
     # Если только один файл и указан -o, используем его
     if total_inputs == 1 and args.output and all_files:

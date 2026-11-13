@@ -21,7 +21,7 @@ class PandocFormatTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp_dir.name)
         self.input_path = self.directory / 'Книга.odt'
-        self.input_path.write_bytes(b'')
+        self.write_odt_with_images(self.input_path)
         self.which_patcher = patch(
             'convert.shutil.which',
             return_value='/usr/bin/fake',
@@ -43,6 +43,14 @@ class PandocFormatTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def valid_image_bytes(self, image_format='PNG'):
+        from PIL import Image
+
+        image = Image.new('RGB', (2, 2), color=(30, 60, 90))
+        image_buffer = io.BytesIO()
+        image.save(image_buffer, format=image_format)
+        return image_buffer.getvalue()
+
     def test_startup_warns_when_external_utilities_are_missing(self):
         empty_directory = self.directory / 'empty'
         empty_directory.mkdir()
@@ -55,9 +63,10 @@ class PandocFormatTests(unittest.TestCase):
             'verbose',
         ]):
             with patch('convert.shutil.which', return_value=None):
-                with redirect_stdout(stdout), redirect_stderr(stderr):
-                    with self.assertRaises(SystemExit) as exit_context:
-                        convert.main()
+                with patch('convert.importlib.util.find_spec', return_value=None):
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as exit_context:
+                            convert.main()
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn('pandoc не найден в PATH', stderr.getvalue())
@@ -65,6 +74,37 @@ class PandocFormatTests(unittest.TestCase):
         self.assertIn('pdfinfo не найден в PATH', stderr.getvalue())
         self.assertIn('pdftotext не найден в PATH', stderr.getvalue())
         self.assertIn('pdftoppm не найден в PATH', stderr.getvalue())
+        self.assertIn('qpdf не найден в PATH', stderr.getvalue())
+        self.assertIn('Python-пакет Pillow не найден', stderr.getvalue())
+        self.assertIn('sudo apt install qpdf', stderr.getvalue())
+        self.assertIn(
+            'python -m pip install -r requirements.txt',
+            stderr.getvalue(),
+        )
+
+    def test_startup_reports_installed_utilities_and_packages(self):
+        empty_directory = self.directory / 'empty'
+        empty_directory.mkdir()
+        stdout = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(empty_directory),
+            '--mode',
+            'verbose',
+        ]):
+            with patch('convert.shutil.which', return_value='/usr/bin/tool'):
+                with patch(
+                    'convert.importlib.util.find_spec',
+                    return_value=object(),
+                ):
+                    with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as exit_context:
+                            convert.main()
+
+        self.assertEqual(exit_context.exception.code, 0)
+        self.assertIn('pandoc найден в PATH', stdout.getvalue())
+        self.assertIn('Python-пакет Pillow установлен', stdout.getvalue())
 
     def test_missing_xelatex_is_reported_before_running_pandoc(self):
         with patch('convert.shutil.which', return_value=None):
@@ -570,8 +610,14 @@ Metadata Stream: yes
         stdout = io.StringIO()
         stderr = io.StringIO()
         side_effect = run_side_effect or fake_run
+
+        def fake_qpdf(command, **kwargs):
+            if command[0] == 'qpdf':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
+            return side_effect(command, **kwargs)
+
         with patch.object(sys, 'argv', ['convert.py', *args]):
-            with patch('convert.subprocess.run', side_effect=side_effect):
+            with patch('convert.subprocess.run', side_effect=fake_qpdf):
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     convert.main()
         return commands, stdout.getvalue(), stderr.getvalue()
@@ -636,6 +682,8 @@ Metadata Stream: yes
         source_paths['Скан.pdf'].write_bytes(b'%PDF')
 
         def fake_run(command, **_kwargs):
+            if command[0] == 'qpdf':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
             if command[0] == 'pdfinfo':
                 return type('Result', (), {
                     'stdout': 'Metadata Stream: no\n',
@@ -1172,7 +1220,7 @@ Metadata Stream: yes
 
     def test_output_rejects_unsupported_extension_before_overwriting_cover(self):
         source_path = self.directory / 'Книга.odt'
-        source_path.write_bytes(b'')
+        self.write_odt_with_images(source_path)
         cover_path = self.directory / 'Обложка.jpg'
         original_cover = b'original cover'
         cover_path.write_bytes(original_cover)
@@ -1375,7 +1423,7 @@ Metadata Stream: yes
         text_path.write_text('Текст книги.\n', encoding='utf-8')
         cover_path = self.directory / 'media' / 'Книга.png'
         cover_path.parent.mkdir()
-        cover_path.write_bytes(b'cover image')
+        cover_path.write_bytes(self.valid_image_bytes())
 
         commands, _, stderr = self.run_conversion('epub', input_path=text_path)
 
@@ -1390,12 +1438,12 @@ Metadata Stream: yes
         input_path.write_text('# Книга\n', encoding='utf-8')
         media_cover = source_directory / 'media' / 'Книга.jpg'
         media_cover.parent.mkdir()
-        media_cover.write_bytes(b'media cover')
+        media_cover.write_bytes(self.valid_image_bytes('JPEG'))
         other_cover = source_directory / 'other' / 'Книга.png'
         other_cover.parent.mkdir()
-        other_cover.write_bytes(b'other cover')
+        other_cover.write_bytes(self.valid_image_bytes())
         source_cover = source_directory / 'Книга.gif'
-        source_cover.write_bytes(b'source cover')
+        source_cover.write_bytes(self.valid_image_bytes('GIF'))
 
         self.assertEqual(
             convert._find_cover_file(input_path),
@@ -1420,10 +1468,10 @@ Metadata Stream: yes
         media_directory = self.directory / 'custom-media'
         media_directory.mkdir()
         media_cover = media_directory / 'Книга.webp'
-        media_cover.write_bytes(b'media cover')
+        media_cover.write_bytes(self.valid_image_bytes('WEBP'))
         other_cover = source_directory / 'other' / 'Книга.jpg'
         other_cover.parent.mkdir()
-        other_cover.write_bytes(b'other cover')
+        other_cover.write_bytes(self.valid_image_bytes('JPEG'))
 
         self.assertEqual(
             convert._find_cover_file(
@@ -1453,7 +1501,8 @@ Metadata Stream: yes
             archive.writestr('meta.xml', meta_xml.encode('utf-8'))
         cover_path = self.directory / 'media' / 'Книга.jpg'
         cover_path.parent.mkdir()
-        cover_path.write_bytes(b'cover image')
+        cover_bytes = self.valid_image_bytes('JPEG')
+        cover_path.write_bytes(cover_bytes)
 
         with patch.object(sys, 'argv', [
             'convert.py',
@@ -1466,13 +1515,13 @@ Metadata Stream: yes
                 convert.main()
 
         with zipfile.ZipFile(self.directory / 'Книга.epub') as archive:
-            self.assertEqual(archive.read('OEBPS/images/cover.jpg'), b'cover image')
+            self.assertEqual(archive.read('OEBPS/images/cover.jpg'), cover_bytes)
 
     def test_markdown_epub_automatically_uses_same_name_cover(self):
         markdown_path = self.directory / 'Книга.md'
         markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
         cover_path = self.directory / 'Книга.png'
-        cover_path.write_bytes(b'cover image')
+        cover_path.write_bytes(self.valid_image_bytes())
         commands = []
 
         def fake_run(command, **_kwargs):
@@ -1501,7 +1550,7 @@ Metadata Stream: yes
         markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
         cover_path = self.directory / 'Обложки' / 'Книга.jpg'
         cover_path.parent.mkdir()
-        cover_path.write_bytes(b'cover image')
+        cover_path.write_bytes(self.valid_image_bytes('JPEG'))
         commands = []
 
         def fake_run(command, **_kwargs):
@@ -1528,7 +1577,7 @@ Metadata Stream: yes
         markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
         cover_path = self.directory / 'Обложки' / 'Книга.jpg'
         cover_path.parent.mkdir()
-        cover_path.write_bytes(b'cover image')
+        cover_path.write_bytes(self.valid_image_bytes('JPEG'))
         commands = []
 
         def fake_run(command, **_kwargs):
@@ -1554,8 +1603,8 @@ Metadata Stream: yes
     def test_image_folder_creates_epub_in_natural_image_order(self):
         image_directory = self.directory / 'Фотоальбом'
         image_directory.mkdir()
-        (image_directory / 'page10.png').write_bytes(b'image 10')
-        (image_directory / 'page2.png').write_bytes(b'image 2')
+        (image_directory / 'page10.png').write_bytes(self.valid_image_bytes())
+        (image_directory / 'page2.png').write_bytes(self.valid_image_bytes())
         output_path = self.directory / 'Результат.epub'
         css_path = self.directory / 'image-styles.css'
         css_path.write_text('img { max-width: 90%; }', encoding='utf-8')
@@ -1600,11 +1649,235 @@ Metadata Stream: yes
         self.assertTrue(output_path.is_file())
         self.assertEqual(stdout.getvalue().strip(), 'Фотоальбом — Результат.epub — УСПЕШНО')
 
+    def test_corrupt_image_folder_fails_before_creating_output(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        image_directory = self.directory / 'Фотоальбом'
+        image_directory.mkdir()
+        (image_directory / 'page1.png').write_bytes(b'not a valid image')
+        output_path = self.directory / 'Книга.epub'
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            str(image_directory),
+            '--format',
+            'epub',
+            '--input-formats',
+            'images',
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.subprocess.run',
+                side_effect=AssertionError('Conversion must stop at preflight'),
+            ):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('Повреждённое изображение', stderr.getvalue())
+        self.assertFalse(output_path.exists())
+
+    def test_missing_pillow_reports_install_instructions(self):
+        image_directory = self.directory / 'Фотоальбом'
+        image_directory.mkdir()
+        (image_directory / 'page1.png').write_bytes(self.valid_image_bytes())
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(image_directory),
+            '--format',
+            'epub',
+            '--input-formats',
+            'images',
+            '--no-timestamp',
+        ]):
+            with patch.dict(sys.modules, {'PIL': None}):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('python -m pip install -r requirements.txt', stderr.getvalue())
+        self.assertFalse((self.directory / 'Фотоальбом.epub').exists())
+
+    def test_corrupt_odt_image_fails_before_creating_any_output(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        odt_path = self.directory / 'Документ.odt'
+        with zipfile.ZipFile(odt_path, 'w') as archive:
+            archive.writestr('mimetype', 'application/vnd.oasis.opendocument.text')
+            archive.writestr(
+                'content.xml',
+                '<office:document-content '
+                'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"/>',
+            )
+            archive.writestr('Pictures/broken.png', b'not a valid image')
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            str(odt_path),
+            '--format',
+            'epub',
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.subprocess.run',
+                side_effect=AssertionError('Conversion must stop at preflight'),
+            ):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('broken.png', stderr.getvalue())
+        self.assertFalse((self.directory / 'Книга.epub').exists())
+        self.assertFalse((self.directory / 'Документ.epub').exists())
+
+    def test_odt_crc_error_stops_batch_before_creating_outputs(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        odt_path = self.directory / 'Документ.odt'
+        content_xml = (
+            '<office:document-content '
+            'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">'
+            'CRC_SENTINEL</office:document-content>'
+        )
+        with zipfile.ZipFile(odt_path, 'w') as archive:
+            archive.writestr(
+                'mimetype',
+                'application/vnd.oasis.opendocument.text',
+                compress_type=zipfile.ZIP_STORED,
+            )
+            archive.writestr(
+                'content.xml',
+                content_xml,
+                compress_type=zipfile.ZIP_STORED,
+            )
+        archive_bytes = bytearray(odt_path.read_bytes())
+        sentinel_index = archive_bytes.index(b'CRC_SENTINEL')
+        archive_bytes[sentinel_index] ^= 1
+        odt_path.write_bytes(archive_bytes)
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            str(odt_path),
+            '--format',
+            'epub',
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.subprocess.run',
+                side_effect=AssertionError('Conversion must stop at preflight'),
+            ):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('CRC', stderr.getvalue())
+        self.assertFalse((self.directory / 'Книга.epub').exists())
+        self.assertFalse((self.directory / 'Документ.epub').exists())
+
+    def test_epub_without_container_stops_batch_before_creating_outputs(self):
+        markdown_path = self.directory / 'Источник.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        epub_path = self.directory / 'Документ.epub'
+        with zipfile.ZipFile(epub_path, 'w') as archive:
+            archive.writestr(
+                'mimetype',
+                'application/epub+zip',
+                compress_type=zipfile.ZIP_STORED,
+            )
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            str(epub_path),
+            '--format',
+            'odt',
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.subprocess.run',
+                side_effect=AssertionError('Conversion must stop at preflight'),
+            ):
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('META-INF/container.xml', stderr.getvalue())
+        self.assertFalse((self.directory / 'Источник.odt').exists())
+        self.assertFalse((self.directory / 'Документ.odt').exists())
+
+    def test_qpdf_rejects_damaged_pdf_before_creating_output(self):
+        pdf_path = self.directory / 'Повреждённый.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(pdf_path),
+            '--format',
+            'txt',
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.subprocess.run',
+                side_effect=subprocess.CalledProcessError(
+                    2,
+                    ['qpdf', '--check', str(pdf_path)],
+                    stderr='PDF structure is damaged',
+                ),
+            ) as run:
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertEqual(run.call_args.args[0][:2], ['qpdf', '--check'])
+        self.assertIn('PDF structure is damaged', stderr.getvalue())
+        self.assertFalse(pdf_path.with_suffix('.txt').exists())
+
+    def test_missing_qpdf_stops_pdf_conversion_with_install_message(self):
+        pdf_path = self.directory / 'Книга.pdf'
+        pdf_path.write_bytes(b'%PDF')
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(pdf_path),
+            '--format',
+            'txt',
+            '--no-timestamp',
+        ]):
+            with patch('convert.shutil.which', return_value=None):
+                with patch(
+                    'convert.subprocess.run',
+                    side_effect=AssertionError('qpdf is required for PDF validation'),
+                ):
+                    with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as exit_context:
+                            convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('установите qpdf', stderr.getvalue())
+        self.assertFalse(pdf_path.with_suffix('.txt').exists())
+
     def test_image_folder_creates_pdf_with_one_image_per_page(self):
         image_directory = self.directory / 'Фотоальбом'
         image_directory.mkdir()
-        (image_directory / 'page10.png').write_bytes(b'image 10')
-        (image_directory / 'page2.png').write_bytes(b'image 2')
+        (image_directory / 'page10.png').write_bytes(self.valid_image_bytes())
+        (image_directory / 'page2.png').write_bytes(self.valid_image_bytes())
         commands = []
 
         def fake_run(command, **_kwargs):
@@ -1638,7 +1911,7 @@ Metadata Stream: yes
     def test_image_folder_pdf_reports_missing_xelatex_before_pandoc(self):
         image_directory = self.directory / 'Pictures'
         image_directory.mkdir()
-        (image_directory / 'page1.png').write_bytes(b'image')
+        (image_directory / 'page1.png').write_bytes(self.valid_image_bytes())
         stderr = io.StringIO()
 
         with patch.object(sys, 'argv', [
@@ -1786,7 +2059,7 @@ Metadata Stream: yes
 
     def test_non_epub_options_are_ignored_for_other_output_formats(self):
         source_path = self.directory / 'Книга.odt'
-        source_path.write_bytes(b'')
+        self.write_odt_with_images(source_path)
         commands, _, stderr = self.run_conversion(
             'md',
             input_path=source_path,
@@ -1858,8 +2131,8 @@ Metadata Stream: yes
         image_directory = self.directory / 'Pictures'
         nested_directory = image_directory / 'nested'
         nested_directory.mkdir(parents=True)
-        (image_directory / 'front.png').write_bytes(b'front')
-        (nested_directory / 'page2.png').write_bytes(b'nested')
+        (image_directory / 'front.png').write_bytes(self.valid_image_bytes())
+        (nested_directory / 'page2.png').write_bytes(self.valid_image_bytes())
 
         def fake_run(command, **_kwargs):
             markdown_path = Path(command[command.index('--output') - 1])
@@ -1913,11 +2186,13 @@ Metadata Stream: yes
         )
         cover_path = self.directory / 'Обложки' / 'PDF книга.jpg'
         cover_path.parent.mkdir()
-        cover_path.write_bytes(b'cover image')
+        cover_path.write_bytes(self.valid_image_bytes('JPEG'))
         commands = []
         temporary_inputs = []
 
         def fake_run(command, **_kwargs):
+            if command[0] == 'qpdf':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
             commands.append(command)
             if command[0] == 'pdfinfo':
                 return type('Result', (), {
@@ -2136,8 +2411,8 @@ Metadata Stream: yes
                 Path(command[-1]).write_bytes(b'\n \n')
             elif command[0] == 'pdftoppm':
                 prefix = command[-1]
-                Path(f'{prefix}-1.png').write_bytes(b'page 1')
-                Path(f'{prefix}-2.png').write_bytes(b'page 2')
+                Path(f'{prefix}-1.png').write_bytes(self.valid_image_bytes())
+                Path(f'{prefix}-2.png').write_bytes(self.valid_image_bytes())
             else:
                 markdown_path = Path(command[command.index('--output') - 1])
                 markdown = markdown_path.read_text(encoding='utf-8')
@@ -2182,8 +2457,8 @@ Metadata Stream: yes
     def test_image_folder_can_be_converted_to_odt_with_page_breaks(self):
         image_directory = self.directory / 'Фотоальбом'
         image_directory.mkdir()
-        (image_directory / 'page10.png').write_bytes(b'image 10')
-        (image_directory / 'page2.png').write_bytes(b'image 2')
+        (image_directory / 'page10.png').write_bytes(self.valid_image_bytes())
+        (image_directory / 'page2.png').write_bytes(self.valid_image_bytes())
         output_path = self.directory / 'Фотоальбом.odt'
         commands = []
 
@@ -2233,6 +2508,8 @@ Metadata Stream: yes
         commands = []
 
         def fake_run(command, **_kwargs):
+            if command[0] == 'qpdf':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
             commands.append(command)
             if command[0] == 'pdfinfo':
                 return type('Result', (), {
@@ -2287,8 +2564,8 @@ Metadata Stream: yes
                 self.assertIn('-png', command)
                 self.assertIn('150', command)
                 prefix = command[-1]
-                Path(f'{prefix}-2.png').write_bytes(b'page 2')
-                Path(f'{prefix}-1.png').write_bytes(b'page 1')
+                Path(f'{prefix}-2.png').write_bytes(self.valid_image_bytes())
+                Path(f'{prefix}-1.png').write_bytes(self.valid_image_bytes())
             else:
                 markdown_path = Path(command[command.index('--output') - 1])
                 markdown = markdown_path.read_text(encoding='utf-8')
@@ -2338,7 +2615,7 @@ Metadata Stream: yes
         odt_path = books / 'Document.odt'
         markdown_path.write_text('# Markdown\n', encoding='utf-8')
         text_path.write_text('Plain text\n', encoding='utf-8')
-        odt_path.write_bytes(b'')
+        self.write_odt_with_images(odt_path)
         commands = []
 
         def fake_run(command, **_kwargs):
@@ -2450,10 +2727,12 @@ Metadata Stream: yes
         text_path.write_text('Plain text\n', encoding='utf-8')
         pdf_path.write_bytes(b'%PDF')
         shutil.copyfile(Path(__file__).with_name('test_Draft.odt'), odt_path)
-        (image_directory / 'page1.png').write_bytes(b'image')
+        (image_directory / 'page1.png').write_bytes(self.valid_image_bytes())
         commands = []
 
         def fake_run(command, **_kwargs):
+            if command[0] == 'qpdf':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
             commands.append(command)
             if command[0] == 'pdfinfo':
                 return type('Result', (), {
@@ -2571,7 +2850,7 @@ Metadata Stream: yes
         included_file = books / 'keep' / 'include.odt'
         excluded_file.write_bytes(b'')
         excluded_named_file.write_bytes(b'')
-        included_file.write_bytes(b'')
+        self.write_odt_with_images(included_file)
         exclude_file = self.directory / 'exclude.txt'
         exclude_file.write_text('keep/ignore.odt\n', encoding='utf-8')
         commands = []
