@@ -129,6 +129,7 @@ def warn_missing_external_utilities():
     utilities = {
         'pandoc': 'часть маршрутов конвертации требует Pandoc',
         PDF_ENGINE: 'создание PDF через Pandoc требует PDF-движок XeLaTeX',
+        'pdfinfo': 'извлечение встроенных метаданных из PDF требует Poppler',
         'pdftotext': 'извлечение текста из PDF требует Poppler',
         'pdftoppm': 'обработка сканированных PDF требует Poppler',
     }
@@ -471,6 +472,70 @@ def extract_meta(meta_xml):
             meta['language'] = elem.text.strip()
 
     return meta
+
+
+def extract_pdf_metadata(pdf_path):
+    """Извлечь стандартные поля PDF и поддерживаемые поля XMP."""
+    result = subprocess.run(
+        ['pdfinfo', '-isodates', str(pdf_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    info = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(':')
+        if separator:
+            info[key.strip().casefold()] = value.strip()
+
+    metadata = {
+        field: info.get(label, '')
+        for field, label in (
+            ('title', 'title'),
+            ('author', 'author'),
+            ('publisher', 'publisher'),
+            ('rights', 'rights'),
+            ('language', 'language'),
+        )
+        if info.get(label)
+    }
+
+    if info.get('metadata stream', '').casefold() == 'yes':
+        xmp_result = subprocess.run(
+            ['pdfinfo', '-meta', str(pdf_path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        if xmp_result.stdout.strip():
+            xmp_root = ET.fromstring(xmp_result.stdout)
+            xmp_fields = {
+                'title': 'title',
+                'creator': 'author',
+                'publisher': 'publisher',
+                'rights': 'rights',
+                'language': 'language',
+            }
+            for element in xmp_root.iter():
+                local_name = element.tag.rsplit('}', 1)[-1].casefold()
+                field = xmp_fields.get(local_name)
+                if field:
+                    value = next(
+                        (
+                            child.text.strip()
+                            for child in element.iter()
+                            if child is not element
+                            and child.text
+                            and child.text.strip()
+                        ),
+                        element.text.strip() if element.text and element.text.strip() else '',
+                    )
+                    if value:
+                        metadata[field] = value
+
+    return metadata
 
 
 # ============================================================
@@ -1111,12 +1176,29 @@ def _set_epub_metadata(
     author=None,
     publisher=None,
     rights=None,
+    title=None,
+    default_title=None,
+    language=None,
+    default_language=None,
+    date=None,
+    default_date=None,
 ):
     metadata = package.find(f'{{{opf_ns}}}metadata')
     if metadata is None:
         metadata = ET.SubElement(package, f'{{{opf_ns}}}metadata')
 
     dc_ns = 'http://purl.org/dc/elements/1.1/'
+    title_element = metadata.find(f'{{{dc_ns}}}title')
+    if title_element is None and (title is not None or default_title is not None):
+        title_element = ET.SubElement(metadata, f'{{{dc_ns}}}title')
+    if title_element is not None:
+        if title is not None:
+            title_element.text = title
+        elif default_title is not None and not (
+            title_element.text and title_element.text.strip()
+        ):
+            title_element.text = default_title
+
     creators = metadata.findall(f'{{{dc_ns}}}creator')
     creator = next(
         (element for element in creators if element.text and element.text.strip()),
@@ -1143,6 +1225,30 @@ def _set_epub_metadata(
         rights_element.text = rights
     elif not rights_element.text or not rights_element.text.strip():
         rights_element.text = DEFAULT_RIGHTS
+
+    language_element = metadata.find(f'{{{dc_ns}}}language')
+    if language_element is None and (
+        language is not None or default_language is not None
+    ):
+        language_element = ET.SubElement(metadata, f'{{{dc_ns}}}language')
+    if language_element is not None:
+        if language is not None:
+            language_element.text = language
+        elif default_language is not None and not (
+            language_element.text and language_element.text.strip()
+        ):
+            language_element.text = default_language
+
+    date_element = metadata.find(f'{{{dc_ns}}}date')
+    if date_element is None and (date is not None or default_date is not None):
+        date_element = ET.SubElement(metadata, f'{{{dc_ns}}}date')
+    if date_element is not None:
+        if date is not None:
+            date_element.text = date
+        elif default_date is not None and not (
+            date_element.text and date_element.text.strip()
+        ):
+            date_element.text = default_date
 
     unique_identifier_id = package.get('unique-identifier')
     identifiers = metadata.findall(f'{{{dc_ns}}}identifier')
@@ -1225,6 +1331,12 @@ def update_epub_metadata(
     author=None,
     publisher=None,
     rights=None,
+    title=None,
+    default_title=None,
+    language=None,
+    default_language=None,
+    date=None,
+    default_date=None,
 ):
     epub_path = os.path.abspath(epub_path)
     temp_fd, temp_path = tempfile.mkstemp(
@@ -1259,6 +1371,12 @@ def update_epub_metadata(
                 author,
                 publisher,
                 rights,
+                title,
+                default_title,
+                language,
+                default_language,
+                date,
+                default_date,
             )
             updates = {
                 opf_path: ET.tostring(package, encoding='utf-8'),
@@ -1330,6 +1448,12 @@ def add_media_files_to_epub(
     author=None,
     publisher=None,
     rights=None,
+    title=None,
+    default_title=None,
+    language=None,
+    default_language=None,
+    date=None,
+    default_date=None,
 ):
     """Добавить аудио/видео, страницу воспроизведения и записи EPUB-манифеста."""
     media_paths = [
@@ -1374,6 +1498,12 @@ def add_media_files_to_epub(
                 author,
                 publisher,
                 rights,
+                title,
+                default_title,
+                language,
+                default_language,
+                date,
+                default_date,
             )
             used_ids = {
                 item.get('id')
@@ -1674,7 +1804,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     parser.add_argument('--mode', choices=('quiet', 'summary', 'verbose'), default='verbose',
                         help='Режим вывода: quiet — только критические ошибки, summary — строка результата по файлу, verbose — подробный вывод')
     parser.add_argument('--log-file', metavar='PATH', help='Записывать подробный журнал в файл (добавление в конец; относительный путь от текущей папки)')
-    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF); автопоиск по имени выполняется для ODT')
+    parser.add_argument('-c', '--cover', help='Путь к обложке (JPEG/PNG/GIF/WebP/SVG/BMP/TIFF); автопоиск по имени выполняется для ODT, Markdown и PDF при создании EPUB')
     parser.add_argument('-o', '--output', help='Путь к файлу результата или папке назначения; для ODT сохраняется суффикс даты')
     overwrite_group = parser.add_mutually_exclusive_group()
     overwrite_group.add_argument('--ask-overwrite', action='store_true',
@@ -1692,19 +1822,19 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
     parser.add_argument(
         '-a',
         '--author',
-        help=f'Автор книги (по умолчанию из метаданных ODT или {DEFAULT_AUTHOR})',
+        help=f'Автор книги (по умолчанию из метаданных источника или {DEFAULT_AUTHOR})',
     )
     parser.add_argument(
         '--publisher',
         default=None,
-        help=f'Издатель книги (по умолчанию: {DEFAULT_PUBLISHER})',
+        help=f'Издатель книги (по умолчанию из метаданных источника или {DEFAULT_PUBLISHER})',
     )
     parser.add_argument(
         '--rights',
         default=None,
-        help=f'Информация об авторских правах (по умолчанию: {DEFAULT_RIGHTS})',
+        help=f'Информация об авторских правах (по умолчанию из метаданных источника или {DEFAULT_RIGHTS})',
     )
-    parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных ODT, при их отсутствии — ru')
+    parser.add_argument('-l', '--lang', default='', help='Язык книги (ISO 639-1). По умолчанию: из метаданных источника, при их отсутствии — ru')
     parser.add_argument(
         '--css',
         metavar='PATH',
@@ -1942,7 +2072,13 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
         media_paths.sort(key=lambda media_path: media_path.relative_to(media_root).as_posix().casefold())
         return media_paths, media_root
 
-    def attach_epub_media(output_path, media_dir, recursive):
+    def attach_epub_media(
+        output_path,
+        media_dir,
+        recursive,
+        metadata_defaults=None,
+    ):
+        metadata_defaults = metadata_defaults or {}
         media_paths, media_root = find_epub_media_files(media_dir, recursive)
         try:
             if media_paths:
@@ -1955,6 +2091,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     author=args.author,
                     publisher=args.publisher,
                     rights=args.rights,
+                    **metadata_defaults,
                 )
             else:
                 update_epub_metadata(
@@ -1964,6 +2101,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     author=args.author,
                     publisher=args.publisher,
                     rights=args.rights,
+                    **metadata_defaults,
                 )
                 media_count = 0
         except (OSError, ValueError, ET.ParseError, zipfile.BadZipFile) as e:
@@ -2080,6 +2218,21 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             source_name = 'PDF' if is_pdf else 'Markdown' if is_markdown else 'TXT' if is_plain_text else 'ODT'
             if not is_pdf:
                 log_step('1/1', f'Конвертация {source_name} в {format_names[args.format]} с Pandoc...')
+            pdf_metadata = {}
+            if is_pdf and args.format == 'epub':
+                try:
+                    pdf_metadata = extract_pdf_metadata(input_path)
+                except FileNotFoundError:
+                    log_warning(
+                        'pdfinfo не найден; для PDF будут использованы метаданные '
+                        'по умолчанию. Установите Poppler для чтения метаданных PDF.'
+                    )
+                except (OSError, subprocess.CalledProcessError, ET.ParseError) as e:
+                    error = getattr(e, 'stderr', '') or str(e)
+                    log_warning(
+                        f'Не удалось извлечь метаданные PDF {input_path}: '
+                        f'{error.strip()}; будут использованы значения по умолчанию.'
+                    )
             pandoc_command = [
                 'pandoc',
                 f'--from={source_format}',
@@ -2089,10 +2242,18 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 pandoc_command.append(f'--pdf-engine={PDF_ENGINE}')
                 pandoc_command.extend(['-V', 'mainfont=DejaVu Serif'])
             if is_pdf:
-                pandoc_command.extend(['-M', f'title={explicit_title or Path(input_path).stem}'])
-                pandoc_command.extend(['-M', f'lang={explicit_lang or "ru"}'])
-                if explicit_author:
-                    pandoc_command.extend(['-M', f'author={explicit_author}'])
+                pdf_metadata_values = {
+                    'title': explicit_title or pdf_metadata.get('title') or Path(input_path).stem,
+                    'lang': explicit_lang or pdf_metadata.get('language') or 'ru',
+                    'author': explicit_author or pdf_metadata.get('author') or DEFAULT_AUTHOR,
+                    'publisher': args.publisher or pdf_metadata.get('publisher') or DEFAULT_PUBLISHER,
+                    'rights': args.rights or pdf_metadata.get('rights') or DEFAULT_RIGHTS,
+                }
+                pandoc_command.extend(
+                    argument
+                    for key, value in pdf_metadata_values.items()
+                    for argument in ('-M', f'{key}={value}')
+                )
             elif is_text_source:
                 if explicit_title:
                     pandoc_command.extend(['-M', f'title={explicit_title}'])
@@ -2100,12 +2261,32 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     pandoc_command.extend(['-M', f'author={explicit_author}'])
                 if explicit_lang:
                     pandoc_command.extend(['-M', f'lang={explicit_lang}'])
-            if (is_text_source or is_pdf) and args.format == 'epub' and explicit_cover:
-                cover_path = os.path.abspath(explicit_cover)
-                if not os.path.isfile(cover_path):
-                    log_error(f'Файл обложки не найден: {cover_path}')
-                    return False
-                pandoc_command.append(f'--epub-cover-image={cover_path}')
+            if (is_text_source or is_pdf) and args.format == 'epub':
+                cover_path = None
+                if explicit_cover:
+                    cover_path = Path(os.path.abspath(explicit_cover))
+                    if not cover_path.is_file():
+                        log_error(f'Файл обложки не найден: {cover_path}')
+                        return False
+                elif is_markdown or is_pdf:
+                    source_directory = Path(input_path).parent
+                    cover_path = next(
+                        (
+                            source_directory / f'{Path(input_path).stem}{extension}'
+                            for extension in SUPPORTED_IMAGE_EXTENSIONS
+                            if (
+                                source_directory / f'{Path(input_path).stem}{extension}'
+                            ).is_file()
+                        ),
+                        None,
+                    )
+                    if cover_path:
+                        log_ok(f'Обложка найдена автоматически: {cover_path}')
+
+                if cover_path:
+                    pandoc_command.append(
+                        f'--epub-cover-image={cover_path}'
+                    )
             if args.format == 'epub':
                 if args.css:
                     pandoc_command.extend(['--css', args.css])
@@ -2269,12 +2450,23 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     if not run_pandoc(pandoc_command):
                         return False
 
-            if args.format == 'epub' and not attach_epub_media(
-                output_path,
-                media_dir,
-                media_recursive,
-            ):
-                return False
+            if args.format == 'epub':
+                generation_date = datetime.now().isoformat(timespec='seconds')
+                metadata_defaults = {
+                    'title': args.title,
+                    'default_title': Path(input_path).stem,
+                    'language': args.lang or None,
+                    'default_language': 'ru',
+                    'date': None,
+                    'default_date': generation_date,
+                }
+                if not attach_epub_media(
+                    output_path,
+                    media_dir,
+                    media_recursive,
+                    metadata_defaults=metadata_defaults,
+                ):
+                    return False
 
             log_ok(f'{format_names[args.format]} сохранён: {output_path}')
             return True

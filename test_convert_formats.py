@@ -61,6 +61,7 @@ class PandocFormatTests(unittest.TestCase):
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn('pandoc не найден в PATH', stderr.getvalue())
         self.assertIn('xelatex не найден в PATH', stderr.getvalue())
+        self.assertIn('pdfinfo не найден в PATH', stderr.getvalue())
         self.assertIn('pdftotext не найден в PATH', stderr.getvalue())
         self.assertIn('pdftoppm не найден в PATH', stderr.getvalue())
 
@@ -337,6 +338,69 @@ class PandocFormatTests(unittest.TestCase):
         metadata = package.find(f'{{{opf_ns}}}metadata')
         self.assertEqual(metadata.find(f'{{{dc_ns}}}publisher').text, 'Переопределение')
         self.assertEqual(metadata.find(f'{{{dc_ns}}}rights').text, 'Переопределение')
+
+    def test_epub_metadata_defaults_fill_missing_values_without_replacing_source(self):
+        opf_ns = 'http://www.idpf.org/2007/opf'
+        dc_ns = 'http://purl.org/dc/elements/1.1/'
+        package = ET.fromstring('''<package xmlns="http://www.idpf.org/2007/opf"
+  xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>Заголовок из Markdown</dc:title>
+    <dc:creator>Автор из Markdown</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:date>2025-01-02</dc:date>
+  </metadata>
+  <manifest/>
+</package>''')
+
+        convert._set_epub_metadata(
+            package,
+            opf_ns,
+            identifier=None,
+            layout_method=None,
+            default_title='Имя файла',
+            default_language='ru',
+            default_date='2026-11-13',
+        )
+
+        metadata = package.find(f'{{{opf_ns}}}metadata')
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}title').text, 'Заголовок из Markdown')
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}creator').text, 'Автор из Markdown')
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}language').text, 'en')
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}date').text, '2025-01-02')
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}publisher').text, convert.DEFAULT_PUBLISHER)
+        self.assertEqual(metadata.find(f'{{{dc_ns}}}rights').text, convert.DEFAULT_RIGHTS)
+
+    def test_extract_pdf_metadata_prefers_xmp_and_reads_info_dictionary(self):
+        info_output = '''Title: Info title
+Author: Info author
+Metadata Stream: yes
+'''
+        xmp_output = '''<?xml version="1.0"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+  xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <rdf:RDF><rdf:Description>
+    <dc:title><rdf:Alt><rdf:li xml:lang="x-default">XMP title</rdf:li></rdf:Alt></dc:title>
+    <dc:creator><rdf:Seq><rdf:li>XMP author</rdf:li></rdf:Seq></dc:creator>
+    <dc:publisher><rdf:Bag><rdf:li>XMP publisher</rdf:li></rdf:Bag></dc:publisher>
+    <dc:rights><rdf:Alt><rdf:li>Rights</rdf:li></rdf:Alt></dc:rights>
+    <dc:language><rdf:Bag><rdf:li>ru</rdf:li></rdf:Bag></dc:language>
+  </rdf:Description></rdf:RDF>
+</x:xmpmeta>'''
+        with patch('convert.subprocess.run') as run:
+            run.side_effect = [
+                type('Result', (), {'stdout': info_output})(),
+                type('Result', (), {'stdout': xmp_output})(),
+            ]
+            metadata = convert.extract_pdf_metadata('book.pdf')
+
+        self.assertEqual(metadata, {
+            'title': 'XMP title',
+            'author': 'XMP author',
+            'publisher': 'XMP publisher',
+            'rights': 'Rights',
+            'language': 'ru',
+        })
 
     def test_pandoc_epub_route_embeds_media_from_media_directory(self):
         markdown_path = self.directory / 'Книга.md'
@@ -817,6 +881,34 @@ class PandocFormatTests(unittest.TestCase):
                     self.assertEqual(output_path, self.directory / f'{input_path.stem}.{output_format}')
                     self.assertTrue(output_path.is_file())
 
+    def test_markdown_epub_automatically_uses_same_name_cover(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n\nТекст.\n', encoding='utf-8')
+        cover_path = self.directory / 'Книга.png'
+        cover_path.write_bytes(b'cover image')
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--media-dir',
+            str(self.directory),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn(f'--epub-cover-image={cover_path}', commands[0])
+
     def test_image_folder_creates_epub_in_natural_image_order(self):
         image_directory = self.directory / 'Фотоальбом'
         image_directory.mkdir()
@@ -1104,10 +1196,16 @@ class PandocFormatTests(unittest.TestCase):
     def test_pdf_input_is_extracted_and_converted_to_epub(self):
         pdf_path = self.directory / 'PDF книга.pdf'
         pdf_path.write_bytes(b'%PDF')
+        cover_path = self.directory / 'PDF книга.jpg'
+        cover_path.write_bytes(b'cover image')
         commands = []
 
         def fake_run(command, **_kwargs):
             commands.append(command)
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Title: Source PDF title\nAuthor: PDF author\nMetadata Stream: no\n',
+                })()
             if command[0] == 'pdftotext':
                 self.assertEqual(command[1:4], ['-enc', 'UTF-8', '-nopgbrk'])
                 Path(command[-1]).write_text(
@@ -1134,12 +1232,17 @@ class PandocFormatTests(unittest.TestCase):
                     convert.main()
 
         self.assertEqual(stderr.getvalue(), '')
-        self.assertEqual(len(commands), 2)
-        pandoc_command = commands[1]
+        self.assertEqual(len(commands), 3)
+        pandoc_command = commands[2]
         self.assertEqual(pandoc_command[0], 'pandoc')
         self.assertIn('--from=markdown', pandoc_command)
         self.assertIn('--to=epub', pandoc_command)
+        self.assertIn(f'--epub-cover-image={cover_path}', pandoc_command)
         self.assertIn('title=Моя книга', pandoc_command)
+        self.assertIn('author=PDF author', pandoc_command)
+        self.assertIn(f'publisher={convert.DEFAULT_PUBLISHER}', pandoc_command)
+        self.assertIn(f'rights={convert.DEFAULT_RIGHTS}', pandoc_command)
+        self.assertIn('lang=ru', pandoc_command)
         self.assertEqual(
             Path(pandoc_command[pandoc_command.index('--output') + 1]),
             self.directory / 'PDF книга.epub',
@@ -1156,6 +1259,10 @@ class PandocFormatTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             commands.append(command)
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Metadata Stream: no\n',
+                })()
             if command[0] == 'pdftotext':
                 Path(command[-1]).write_text('Текст книги.\n', encoding='utf-8')
             else:
@@ -1166,10 +1273,11 @@ class PandocFormatTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     convert.main()
 
-        self.assertEqual(len(commands), 2)
-        self.assertEqual(commands[0][0], 'pdftotext')
-        self.assertEqual(Path(commands[0][-2]), pdf_path)
-        self.assertEqual(Path(commands[1][commands[1].index('--output') + 1]), books / 'Книга.epub')
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][0], 'pdfinfo')
+        self.assertEqual(commands[1][0], 'pdftotext')
+        self.assertEqual(Path(commands[1][-2]), pdf_path)
+        self.assertEqual(Path(commands[2][commands[2].index('--output') + 1]), books / 'Книга.epub')
 
     def test_missing_pdftotext_is_reported(self):
         pdf_path = self.directory / 'Книга.pdf'
@@ -1192,6 +1300,10 @@ class PandocFormatTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             commands.append(command)
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Metadata Stream: no\n',
+                })()
             if command[0] == 'pdftotext':
                 Path(command[-1]).write_bytes(b'\n \n')
             elif command[0] == 'pdftoppm':
@@ -1213,7 +1325,10 @@ class PandocFormatTests(unittest.TestCase):
             run_side_effect=fake_run,
         )
         self.assertEqual(stderr, '')
-        self.assertEqual([command[0] for command in commands], ['pdftotext', 'pdftoppm', 'pandoc'])
+        self.assertEqual(
+            [command[0] for command in commands],
+            ['pdfinfo', 'pdftotext', 'pdftoppm', 'pandoc'],
+        )
         self.assertIn('страницы PDF будут добавлены', stdout)
         self.assertTrue((self.directory / 'Скан.epub').is_file())
 
@@ -1222,6 +1337,10 @@ class PandocFormatTests(unittest.TestCase):
         pdf_path.write_bytes(b'%PDF')
 
         def missing_pdftoppm(command, **_kwargs):
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Metadata Stream: no\n',
+                })()
             if command[0] == 'pdftotext':
                 Path(command[-1]).write_bytes(b'')
                 return
@@ -1348,6 +1467,10 @@ class PandocFormatTests(unittest.TestCase):
 
         def fake_run(command, **_kwargs):
             commands.append(command)
+            if command[0] == 'pdfinfo':
+                return type('Result', (), {
+                    'stdout': 'Metadata Stream: no\n',
+                })()
             if command[0] == 'pdftotext':
                 Path(command[-1]).write_text('Extracted text\n', encoding='utf-8')
             else:
@@ -1377,7 +1500,7 @@ class PandocFormatTests(unittest.TestCase):
             source_directory / 'converted' / 'Document.epub',
             image_directory / 'converted' / 'Album.epub',
         )
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(len(commands), 6)
         for expected_output in expected_outputs:
             with self.subTest(output=expected_output):
                 self.assertTrue(expected_output.is_file())
