@@ -155,6 +155,10 @@ def check_dependencies():
             'проверка целостности исходных PDF требует qpdf',
             'sudo apt install qpdf',
         ),
+        'ffmpeg': (
+            'проверка целостности используемых аудио- и видеофайлов требует FFmpeg',
+            'sudo apt install ffmpeg',
+        ),
     }
     for utility, (purpose, install_command) in utilities.items():
         if shutil.which(utility) is None:
@@ -271,6 +275,36 @@ def validate_pdf_integrity(file_path):
         )
     subprocess.run(
         ['qpdf', '--check', str(file_path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+
+
+def validate_media_integrity(file_path):
+    if shutil.which('ffmpeg') is None:
+        raise RuntimeError(
+            'Для проверки целостности аудио и видео установите FFmpeg '
+            'и добавьте ffmpeg в PATH.'
+        )
+    subprocess.run(
+        [
+            'ffmpeg',
+            '-v',
+            'error',
+            '-xerror',
+            '-nostdin',
+            '-i',
+            str(file_path),
+            '-map',
+            '0:a?',
+            '-map',
+            '0:v?',
+            '-f',
+            'null',
+            '-',
+        ],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -456,7 +490,11 @@ MARKDOWN_INLINE_CODE_PATTERN = re.compile(rb'(`+)(.*?)\1')
 OBSIDIAN_MEDIA_EMBED_PATTERN = re.compile(rb'!\[\[([^\]\r\n]+)\]\]')
 
 
-def _prepare_markdown_source(source_bytes, include_epub_media=False):
+def _prepare_markdown_source(
+    source_bytes,
+    include_epub_media=False,
+    media_references=None,
+):
     lines = source_bytes.splitlines(keepends=True)
     front_matter_end = 0
     if lines:
@@ -497,6 +535,7 @@ def _prepare_markdown_source(source_bytes, include_epub_media=False):
             updated_text, embed_count = _convert_obsidian_media_embeds(
                 text,
                 include_epub_media,
+                media_references,
             )
             updated_parts.extend((updated_text, code_span.group()))
             if embed_count:
@@ -506,6 +545,7 @@ def _prepare_markdown_source(source_bytes, include_epub_media=False):
         updated_text, embed_count = _convert_obsidian_media_embeds(
             text,
             include_epub_media,
+            media_references,
         )
         updated_parts.append(updated_text)
         if embed_count:
@@ -518,7 +558,11 @@ def _prepare_markdown_source(source_bytes, include_epub_media=False):
     return b''.join(lines), len(modified_indexes)
 
 
-def _convert_obsidian_media_embeds(text, include_epub_media=False):
+def _convert_obsidian_media_embeds(
+    text,
+    include_epub_media=False,
+    media_references=None,
+):
     converted_count = 0
 
     def replace_embed(match):
@@ -545,6 +589,8 @@ def _convert_obsidian_media_embeds(text, include_epub_media=False):
         if not include_epub_media or not media_type:
             return match.group(0)
 
+        if media_references is not None:
+            media_references.append(media_reference)
         converted_count += 1
         media_kind = media_type[0].encode('ascii')
         media_mime_type = media_type[1].encode('ascii')
@@ -583,9 +629,30 @@ def _find_obsidian_vault_root(source_path):
     return None
 
 
-def add_obsidian_embedded_media_to_epub(epub_path, source_path):
+def _resolve_obsidian_media_path(reference, source_path):
     source_directory = Path(os.path.abspath(source_path)).parent
     vault_root = _find_obsidian_vault_root(source_path)
+    reference_path = Path(os.fsdecode(reference))
+    if reference_path.is_absolute():
+        candidates = [reference_path]
+    else:
+        candidates = []
+        if vault_root:
+            candidates.append(vault_root / reference_path)
+        candidates.extend((
+            source_directory / reference_path,
+            Path.cwd() / reference_path,
+        ))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        f'Не найден Obsidian-медиафайл: {os.fsdecode(reference)}'
+    )
+
+
+def add_obsidian_embedded_media_to_epub(epub_path, source_path):
     source_prefix = 'odt2epub-media:'
     source_prefix_bytes = source_prefix.encode('ascii')
     updates = {}
@@ -593,26 +660,6 @@ def add_obsidian_embedded_media_to_epub(epub_path, source_path):
     media_elements = []
     media_paths = {}
     temp_path = None
-
-    def resolve_media_path(reference):
-        reference_path = Path(os.fsdecode(reference))
-        if reference_path.is_absolute():
-            candidates = [reference_path]
-        else:
-            candidates = []
-            if vault_root:
-                candidates.append(vault_root / reference_path)
-            candidates.extend((
-                source_directory / reference_path,
-                Path.cwd() / reference_path,
-            ))
-
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate.resolve()
-        raise FileNotFoundError(
-            f'Не найден Obsidian-медиафайл: {os.fsdecode(reference)}'
-        )
 
     try:
         with zipfile.ZipFile(epub_path, 'r') as source:
@@ -649,7 +696,10 @@ def add_obsidian_embedded_media_to_epub(epub_path, source_path):
                             f'Некорректная ссылка Obsidian-медиа: {media_source}'
                         ) from e
 
-                    media_path = resolve_media_path(reference)
+                    media_path = _resolve_obsidian_media_path(
+                        reference,
+                        source_path,
+                    )
                     media_type = SUPPORTED_EPUB_MEDIA_TYPES.get(
                         media_path.suffix.lower()
                     )
@@ -3720,6 +3770,70 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
             return False
         return True
 
+    def preflight_media_integrity():
+        creates_epub = args.format == 'epub' and (
+            image_books
+            or any(
+                Path(input_path).suffix.lower() != '.epub'
+                for input_path in all_files
+            )
+        )
+        if not creates_epub:
+            return True
+
+        media_assets, _media_root = find_epub_media_files(
+            args.media_dir,
+            recursive=not args.no_recursive,
+        )
+        errors = []
+        for input_path in all_files:
+            if Path(input_path).suffix.lower() not in ('.md', '.txt'):
+                continue
+            media_references = []
+            try:
+                source_bytes = Path(input_path).read_bytes()
+            except OSError as e:
+                errors.append(f'{input_path}: не удалось прочитать источник: {e}')
+                continue
+            _prepare_markdown_source(
+                source_bytes,
+                include_epub_media=True,
+                media_references=media_references,
+            )
+            for reference in media_references:
+                try:
+                    media_assets.append(
+                        _resolve_obsidian_media_path(reference, input_path)
+                    )
+                except OSError as e:
+                    errors.append(f'{input_path}: {e}')
+
+        unique_assets = {}
+        for media_path in media_assets:
+            identity = os.path.normcase(os.path.realpath(media_path))
+            unique_assets.setdefault(identity, media_path)
+
+        for media_path in unique_assets.values():
+            try:
+                validate_media_integrity(media_path)
+            except (
+                OSError,
+                RuntimeError,
+                subprocess.CalledProcessError,
+            ) as e:
+                error = (
+                    getattr(e, 'stderr', '')
+                    or getattr(e, 'stdout', '')
+                    or str(e)
+                )
+                errors.append(f'{media_path}: {error.strip()}')
+
+        if errors:
+            for error in errors:
+                log_error(f'Ошибка проверки аудио/видео: {error}')
+            return False
+        return True
+
     def output_for_source(source_path, image_folder=False):
         source_path = Path(source_path)
         source_directory = source_path if image_folder else source_path.parent
@@ -3831,7 +3945,11 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 f'формату {args.format}'
             )
 
-    if not preflight_source_integrity() or not preflight_image_integrity():
+    if (
+        not preflight_source_integrity()
+        or not preflight_image_integrity()
+        or not preflight_media_integrity()
+    ):
         sys.exit(1)
 
     # Если только один файл и указан -o, используем его

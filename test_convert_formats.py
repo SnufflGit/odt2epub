@@ -75,8 +75,10 @@ class PandocFormatTests(unittest.TestCase):
         self.assertIn('pdftotext не найден в PATH', stderr.getvalue())
         self.assertIn('pdftoppm не найден в PATH', stderr.getvalue())
         self.assertIn('qpdf не найден в PATH', stderr.getvalue())
+        self.assertIn('ffmpeg не найден в PATH', stderr.getvalue())
         self.assertIn('Python-пакет Pillow не найден', stderr.getvalue())
         self.assertIn('sudo apt install qpdf', stderr.getvalue())
+        self.assertIn('sudo apt install ffmpeg', stderr.getvalue())
         self.assertIn(
             'python -m pip install -r requirements.txt',
             stderr.getvalue(),
@@ -104,6 +106,7 @@ class PandocFormatTests(unittest.TestCase):
 
         self.assertEqual(exit_context.exception.code, 0)
         self.assertIn('pandoc найден в PATH', stdout.getvalue())
+        self.assertIn('ffmpeg найден в PATH', stdout.getvalue())
         self.assertIn('Python-пакет Pillow установлен', stdout.getvalue())
 
     def test_missing_xelatex_is_reported_before_running_pandoc(self):
@@ -612,7 +615,7 @@ Metadata Stream: yes
         side_effect = run_side_effect or fake_run
 
         def fake_qpdf(command, **kwargs):
-            if command[0] == 'qpdf':
+            if command[0] in ('qpdf', 'ffmpeg'):
                 return type('Result', (), {'stdout': '', 'stderr': ''})()
             return side_effect(command, **kwargs)
 
@@ -977,6 +980,8 @@ Metadata Stream: yes
         pandoc_input_content = []
 
         def fake_run(command, **_kwargs):
+            if command[0] == 'ffmpeg':
+                return type('Result', (), {'stdout': '', 'stderr': ''})()
             commands.append(command)
             input_path = Path(command[command.index('--output') - 1])
             pandoc_input = input_path.read_bytes()
@@ -1703,6 +1708,78 @@ Metadata Stream: yes
         self.assertEqual(exit_context.exception.code, 1)
         self.assertIn('python -m pip install -r requirements.txt', stderr.getvalue())
         self.assertFalse((self.directory / 'Фотоальбом.epub').exists())
+
+    def test_corrupt_media_fails_before_creating_epub(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        media_directory = self.directory / 'media'
+        media_directory.mkdir()
+        media_path = media_directory / 'track.mp3'
+        media_path.write_bytes(b'not valid audio')
+        stderr = io.StringIO()
+        command = ['ffmpeg', '-v', 'error', '-xerror', '-nostdin', '-i', str(media_path)]
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--media-dir',
+            str(media_directory),
+            '--no-timestamp',
+        ]):
+            with patch('convert.subprocess.run') as run:
+                run.side_effect = subprocess.CalledProcessError(
+                    1,
+                    command,
+                    stderr='Invalid data found when processing input',
+                )
+                with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exit_context:
+                        convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        ffmpeg_command = run.call_args.args[0]
+        self.assertEqual(ffmpeg_command[0], 'ffmpeg')
+        self.assertIn('-xerror', ffmpeg_command)
+        self.assertIn('0:a?', ffmpeg_command)
+        self.assertIn('0:v?', ffmpeg_command)
+        self.assertIn(str(media_path), ffmpeg_command)
+        self.assertIn('Invalid data found', stderr.getvalue())
+        self.assertFalse((self.directory / 'Книга.epub').exists())
+
+    def test_missing_ffmpeg_stops_media_conversion_before_output(self):
+        markdown_path = self.directory / 'Книга.md'
+        markdown_path.write_text('# Книга\n', encoding='utf-8')
+        media_directory = self.directory / 'media'
+        media_directory.mkdir()
+        (media_directory / 'track.mp3').write_bytes(b'audio')
+        stderr = io.StringIO()
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--media-dir',
+            str(media_directory),
+            '--no-timestamp',
+        ]):
+            with patch(
+                'convert.shutil.which',
+                side_effect=lambda name: None if name == 'ffmpeg' else '/usr/bin/fake',
+            ):
+                with patch(
+                    'convert.subprocess.run',
+                    side_effect=AssertionError('ffmpeg is required for media validation'),
+                ):
+                    with redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as exit_context:
+                            convert.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        self.assertIn('установите FFmpeg', stderr.getvalue())
+        self.assertFalse((self.directory / 'Книга.epub').exists())
 
     def test_corrupt_odt_image_fails_before_creating_any_output(self):
         markdown_path = self.directory / 'Книга.md'
