@@ -27,6 +27,7 @@ ODT/Markdown Converter
 """
 
 import argparse
+import base64
 import os
 import sys
 import zipfile
@@ -269,10 +270,10 @@ MARKDOWN_HORIZONTAL_RULE_PATTERN = re.compile(rb'^ {0,3}---[ \t]*(\r?\n)?$')
 MARKDOWN_FENCE_PATTERN = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
 MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(rb'^ {0,3}(`+|~+)[ \t]*(?:\r?\n)?$')
 MARKDOWN_INLINE_CODE_PATTERN = re.compile(rb'(`+)(.*?)\1')
-OBSIDIAN_IMAGE_EMBED_PATTERN = re.compile(rb'!\[\[([^\]\r\n]+)\]\]')
+OBSIDIAN_MEDIA_EMBED_PATTERN = re.compile(rb'!\[\[([^\]\r\n]+)\]\]')
 
 
-def _prepare_markdown_source(source_bytes):
+def _prepare_markdown_source(source_bytes, include_epub_media=False):
     lines = source_bytes.splitlines(keepends=True)
     front_matter_end = 0
     if lines:
@@ -310,13 +311,19 @@ def _prepare_markdown_source(source_bytes):
         cursor = 0
         for code_span in MARKDOWN_INLINE_CODE_PATTERN.finditer(line):
             text = line[cursor:code_span.start()]
-            updated_text, embed_count = _convert_obsidian_image_embeds(text)
+            updated_text, embed_count = _convert_obsidian_media_embeds(
+                text,
+                include_epub_media,
+            )
             updated_parts.extend((updated_text, code_span.group()))
             if embed_count:
                 modified_indexes.add(index)
             cursor = code_span.end()
         text = line[cursor:]
-        updated_text, embed_count = _convert_obsidian_image_embeds(text)
+        updated_text, embed_count = _convert_obsidian_media_embeds(
+            text,
+            include_epub_media,
+        )
         updated_parts.append(updated_text)
         if embed_count:
             modified_indexes.add(index)
@@ -328,30 +335,58 @@ def _prepare_markdown_source(source_bytes):
     return b''.join(lines), len(modified_indexes)
 
 
-def _convert_obsidian_image_embeds(text):
+def _convert_obsidian_media_embeds(text, include_epub_media=False):
     converted_count = 0
 
     def replace_embed(match):
         nonlocal converted_count
-        image_reference, separator, label = match.group(1).partition(b'|')
-        image_reference = image_reference.strip()
-        if Path(os.fsdecode(image_reference)).suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+        media_reference, separator, label = match.group(1).partition(b'|')
+        media_reference = media_reference.strip()
+        extension = Path(os.fsdecode(media_reference)).suffix.lower()
+        label = label.strip() if separator else b''
+        size = re.fullmatch(rb'(\d+)(?:x(\d+))?', label)
+
+        if extension in SUPPORTED_IMAGE_EXTENSIONS:
+            converted_count += 1
+            attributes = b''
+            if size:
+                dimensions = [b'width=' + size.group(1) + b'px']
+                if size.group(2):
+                    dimensions.append(b'height=' + size.group(2) + b'px')
+                attributes = b'{' + b' '.join(dimensions) + b'}'
+                label = b''
+
+            return b'![' + label + b'](<' + media_reference + b'>)' + attributes
+
+        media_type = SUPPORTED_EPUB_MEDIA_TYPES.get(extension)
+        if not include_epub_media or not media_type:
             return match.group(0)
 
         converted_count += 1
-        label = label.strip() if separator else b''
-        size = re.fullmatch(rb'(\d+)(?:x(\d+))?', label)
+        media_kind = media_type[0].encode('ascii')
+        media_token = base64.urlsafe_b64encode(media_reference)
         attributes = b''
         if size:
-            dimensions = [b'width=' + size.group(1) + b'px']
+            dimensions = [b'width="' + size.group(1) + b'"']
             if size.group(2):
-                dimensions.append(b'height=' + size.group(2) + b'px')
-            attributes = b'{' + b' '.join(dimensions) + b'}'
-            label = b''
+                dimensions.append(b'height="' + size.group(2) + b'"')
+            attributes = b' ' + b' '.join(dimensions)
 
-        return b'![' + label + b'](<' + image_reference + b'>)' + attributes
+        return (
+            b'<'
+            + media_kind
+            + b' controls="controls" preload="metadata" src="odt2epub-media:'
+            + media_token
+            + b'"'
+            + attributes
+            + b'>'
+            + 'Воспроизведение не поддерживается этой EPUB-читалкой.'.encode('utf-8')
+            + b'</'
+            + media_kind
+            + b'>'
+        )
 
-    return OBSIDIAN_IMAGE_EMBED_PATTERN.sub(replace_embed, text), converted_count
+    return OBSIDIAN_MEDIA_EMBED_PATTERN.sub(replace_embed, text), converted_count
 
 
 def _find_obsidian_vault_root(source_path):
@@ -360,6 +395,191 @@ def _find_obsidian_vault_root(source_path):
         if (directory / '.obsidian').is_dir():
             return directory
     return None
+
+
+def add_obsidian_embedded_media_to_epub(epub_path, source_path):
+    source_directory = Path(os.path.abspath(source_path)).parent
+    vault_root = _find_obsidian_vault_root(source_path)
+    source_prefix = 'odt2epub-media:'
+    source_prefix_bytes = source_prefix.encode('ascii')
+    updates = {}
+    xhtml_documents = {}
+    media_elements = []
+    media_paths = {}
+    temp_path = None
+
+    def resolve_media_path(reference):
+        reference_path = Path(os.fsdecode(reference))
+        if reference_path.is_absolute():
+            candidates = [reference_path]
+        else:
+            candidates = []
+            if vault_root:
+                candidates.append(vault_root / reference_path)
+            candidates.extend((
+                source_directory / reference_path,
+                Path.cwd() / reference_path,
+            ))
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        raise FileNotFoundError(
+            f'Не найден Obsidian-медиафайл: {os.fsdecode(reference)}'
+        )
+
+    try:
+        with zipfile.ZipFile(epub_path, 'r') as source:
+            archive_names = {info.filename for info in source.infolist()}
+            for archive_path in sorted(archive_names):
+                if not archive_path.lower().endswith(('.xhtml', '.html')):
+                    continue
+                content = source.read(archive_path)
+                if source_prefix_bytes not in content:
+                    continue
+
+                document = ET.fromstring(content)
+                changed = False
+                for element in document.iter():
+                    media_source = element.get('src', '')
+                    if not media_source.startswith(source_prefix):
+                        continue
+
+                    try:
+                        reference = base64.urlsafe_b64decode(
+                            media_source[len(source_prefix):].encode('ascii')
+                        )
+                    except (ValueError, UnicodeError) as e:
+                        raise ValueError(
+                            f'Некорректная ссылка Obsidian-медиа: {media_source}'
+                        ) from e
+
+                    media_path = resolve_media_path(reference)
+                    media_type = SUPPORTED_EPUB_MEDIA_TYPES.get(
+                        media_path.suffix.lower()
+                    )
+                    if not media_type:
+                        raise ValueError(
+                            f'Неподдерживаемый тип Obsidian-медиа: {media_path}'
+                        )
+                    resolved_key = str(media_path)
+                    media_paths.setdefault(resolved_key, (media_path, media_type))
+                    media_elements.append((archive_path, element, resolved_key))
+                    changed = True
+
+                if changed:
+                    xhtml_documents[archive_path] = document
+
+            if not media_elements:
+                return 0
+
+            container = ET.fromstring(source.read('META-INF/container.xml'))
+            container_ns = 'urn:oasis:names:tc:opendocument:xmlns:container'
+            rootfile = container.find(f'.//{{{container_ns}}}rootfile')
+            if rootfile is None or not rootfile.get('full-path'):
+                raise ValueError('В EPUB не найден основной OPF-файл')
+
+            opf_path = rootfile.get('full-path')
+            package_directory = PurePosixPath(opf_path).parent
+            package = ET.fromstring(source.read(opf_path))
+            opf_ns = package.tag[1:].split('}', 1)[0] if package.tag.startswith('{') else ''
+            manifest = package.find(f'{{{opf_ns}}}manifest')
+            if manifest is None:
+                raise ValueError('В EPUB отсутствует manifest')
+
+            used_ids = {
+                item.get('id')
+                for item in manifest.findall(f'{{{opf_ns}}}item')
+                if item.get('id')
+            }
+
+            def unique_id(prefix):
+                candidate = prefix
+                suffix = 1
+                while candidate in used_ids:
+                    suffix += 1
+                    candidate = f'{prefix}-{suffix}'
+                used_ids.add(candidate)
+                return candidate
+
+            media_directory_name = 'obsidian-media'
+            media_directory_path = str(package_directory / media_directory_name)
+            while any(
+                name == media_directory_path
+                or name.startswith(media_directory_path + '/')
+                for name in archive_names
+            ):
+                media_directory_name += '-extra'
+                media_directory_path = str(package_directory / media_directory_name)
+
+            media_archive_paths = {}
+            media_archive_files = {}
+            for index, (resolved_key, media_entry) in enumerate(
+                media_paths.items(),
+                start=1,
+            ):
+                media_path, media_type = media_entry
+                media_name = f'asset-{index:04d}{media_path.suffix.lower()}'
+                media_href = f'{media_directory_name}/{media_name}'
+                media_archive_path = str(package_directory / media_href)
+                media_archive_paths[resolved_key] = media_archive_path
+                ET.SubElement(
+                    manifest,
+                    f'{{{opf_ns}}}item',
+                    {
+                        'id': unique_id(f'obsidian-media-{index}'),
+                        'href': media_href,
+                        'media-type': media_type[1],
+                    },
+                )
+                media_archive_files[media_archive_path] = media_path
+
+            for archive_path, element, resolved_key in media_elements:
+                archive_directory = str(PurePosixPath(archive_path).parent)
+                element.set(
+                    'src',
+                    posixpath.relpath(
+                        media_archive_paths[resolved_key],
+                        archive_directory,
+                    ),
+                )
+
+            updates[opf_path] = ET.tostring(package, encoding='utf-8')
+            updates.update({
+                archive_path: ET.tostring(document, encoding='utf-8')
+                for archive_path, document in xhtml_documents.items()
+            })
+
+            temp_fd, temp_path = tempfile.mkstemp(
+                prefix='.epub-obsidian-media-',
+                suffix='.tmp',
+                dir=os.path.dirname(os.path.abspath(epub_path)),
+            )
+            os.close(temp_fd)
+            with zipfile.ZipFile(
+                temp_path,
+                'w',
+                compression=zipfile.ZIP_DEFLATED,
+            ) as target:
+                target.comment = source.comment
+                for info in source.infolist():
+                    content = updates.pop(info.filename, None)
+                    if content is None:
+                        content = source.read(info.filename)
+                    target.writestr(info, content)
+                for archive_path, media_path in media_archive_files.items():
+                    with media_path.open('rb') as media_source:
+                        with target.open(archive_path, 'w') as media_target:
+                            shutil.copyfileobj(media_source, media_target)
+                for archive_path, content in updates.items():
+                    target.writestr(archive_path, content)
+
+        os.replace(temp_path, epub_path)
+        temp_path = None
+        return len(media_paths)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 SUPPORTED_EPUB_MEDIA_TYPES = {
@@ -2568,6 +2788,7 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
 
                     source_bytes, replaced_rules = _prepare_markdown_source(
                         source_bytes,
+                        include_epub_media=args.format == 'epub',
                     )
                     if replaced_rules:
                         try:
@@ -2607,6 +2828,23 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                         return False
 
             if args.format == 'epub':
+                if is_text_source:
+                    try:
+                        embedded_media_count = add_obsidian_embedded_media_to_epub(
+                            output_path,
+                            input_path,
+                        )
+                    except (OSError, ValueError, ET.ParseError, zipfile.BadZipFile) as e:
+                        log_error(
+                            f'Не удалось встроить Obsidian-аудио/видео в EPUB: {e}'
+                        )
+                        return False
+                    if embedded_media_count:
+                        log_ok(
+                            'В EPUB встроено Obsidian-аудио/видео: '
+                            f'{embedded_media_count}'
+                        )
+
                 generation_date = datetime.now().isoformat(timespec='seconds')
                 metadata_defaults = {
                     'title': args.title,

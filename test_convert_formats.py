@@ -883,6 +883,131 @@ Metadata Stream: yes
         self.assertTrue(image_path.is_file())
         self.assertTrue(output_path.is_file())
 
+    def test_obsidian_audio_and_video_embeds_are_packaged_inline(self):
+        vault_root = self.directory / 'vault'
+        markdown_directory = vault_root / 'Библия'
+        media_directory = markdown_directory / 'Media'
+        media_directory.mkdir(parents=True)
+        (vault_root / '.obsidian').mkdir()
+        audio_path = media_directory / 'Аудио.mp3'
+        video_path = media_directory / 'Видео.webm'
+        audio_path.write_bytes(b'audio data')
+        video_path.write_bytes(b'video data')
+        markdown_path = markdown_directory / 'Глава.md'
+        markdown_path.write_text(
+            '![[Библия/Media/Аудио.mp3]]\n'
+            '![[Библия/Media/Видео.webm|320x240]]\n',
+            encoding='utf-8',
+        )
+        output_path = self.directory / 'Книга.epub'
+        commands = []
+        pandoc_input_content = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            pandoc_input = input_path.read_bytes()
+            pandoc_input_content.append(pandoc_input)
+            with zipfile.ZipFile(io.BytesIO(self.epub_bytes), 'r') as source:
+                with zipfile.ZipFile(
+                    command[command.index('--output') + 1],
+                    'w',
+                ) as target:
+                    for info in source.infolist():
+                        content = source.read(info.filename)
+                        if info.filename == 'OEBPS/chapter1.xhtml':
+                            content = (
+                                b'<?xml version="1.0" encoding="UTF-8"?>'
+                                b'<html xmlns="http://www.w3.org/1999/xhtml">'
+                                b'<body>'
+                                + pandoc_input
+                                + b'</body></html>'
+                            )
+                        target.writestr(info, content)
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'epub',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn(b'<audio controls="controls"', pandoc_input_content[0])
+        self.assertIn(b'<video controls="controls"', pandoc_input_content[0])
+        self.assertIn(
+            f'--resource-path={markdown_directory}{os.pathsep}{vault_root}{os.pathsep}{Path.cwd()}',
+            commands[0],
+        )
+        with zipfile.ZipFile(output_path) as archive:
+            self.assertIsNone(archive.testzip())
+            self.assertEqual(
+                archive.read('OEBPS/obsidian-media/asset-0001.mp3'),
+                b'audio data',
+            )
+            self.assertEqual(
+                archive.read('OEBPS/obsidian-media/asset-0002.webm'),
+                b'video data',
+            )
+            package = ET.fromstring(archive.read('OEBPS/content.opf'))
+            opf_ns = {'opf': 'http://www.idpf.org/2007/opf'}
+            media_items = [
+                item
+                for item in package.findall('opf:manifest/opf:item', opf_ns)
+                if item.get('id', '').startswith('obsidian-media-')
+            ]
+            self.assertEqual(
+                [item.get('media-type') for item in media_items],
+                ['audio/mpeg', 'video/webm'],
+            )
+            chapter = ET.fromstring(archive.read('OEBPS/chapter1.xhtml'))
+            xhtml_ns = {'x': 'http://www.w3.org/1999/xhtml'}
+            self.assertEqual(
+                chapter.find('.//x:audio', xhtml_ns).get('src'),
+                'obsidian-media/asset-0001.mp3',
+            )
+            video = chapter.find('.//x:video', xhtml_ns)
+            self.assertEqual(
+                video.get('src'),
+                'obsidian-media/asset-0002.webm',
+            )
+            self.assertEqual(video.get('width'), '320')
+            self.assertEqual(video.get('height'), '240')
+
+    def test_obsidian_embed_converter_handles_all_supported_media_types(self):
+        for extension in convert.SUPPORTED_IMAGE_EXTENSIONS:
+            with self.subTest(extension=extension):
+                prepared, converted_count = convert._prepare_markdown_source(
+                    f'![[image{extension}]]\n'.encode('ascii'),
+                    include_epub_media=True,
+                )
+                self.assertEqual(converted_count, 1)
+                self.assertEqual(
+                    prepared,
+                    f'![](<image{extension}>)\n'.encode('ascii'),
+                )
+
+        for extension, (media_kind, _media_type) in (
+            convert.SUPPORTED_EPUB_MEDIA_TYPES.items()
+        ):
+            with self.subTest(extension=extension):
+                prepared, converted_count = convert._prepare_markdown_source(
+                    f'![[media{extension}]]\n'.encode('ascii'),
+                    include_epub_media=True,
+                )
+                self.assertEqual(converted_count, 1)
+                self.assertIn(
+                    f'<{media_kind} controls="controls"'.encode('ascii'),
+                    prepared,
+                )
+
     def test_markdown_pdf_rewrite_preserves_front_matter_and_fenced_code(self):
         markdown_bytes = (
             b'---\ntitle: Book\n---\n'
