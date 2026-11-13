@@ -1,5 +1,7 @@
 import io
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -544,6 +546,109 @@ class PandocFormatTests(unittest.TestCase):
         )
         self.assertTrue(output_path.is_file())
 
+    def test_markdown_pdf_rewrites_horizontal_rule_before_wikilink_in_temp_file(self):
+        markdown_path = self.directory / 'Книга.md'
+        original_markdown = (
+            '# Заголовок\n\n---\n![[Библия/Обложка.jpg]]\n\n'
+            '---\n## Следующий раздел\n'
+        ).encode('utf-8')
+        markdown_path.write_bytes(original_markdown)
+        output_path = self.directory / 'Книга.pdf'
+        commands = []
+        temporary_inputs = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            input_path = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(input_path)
+            self.assertNotEqual(input_path, markdown_path)
+            self.assertEqual(
+                input_path.read_bytes(),
+                original_markdown.replace(b'\n---\n', b'\n***\n'),
+            )
+            self.assertIn(
+                f'--resource-path={self.directory}{os.pathsep}{Path.cwd()}',
+                command,
+            )
+            Path(command[command.index('--output') + 1]).write_bytes(b'converted')
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'pdf',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(markdown_path.read_bytes(), original_markdown)
+        self.assertFalse(temporary_inputs[0].exists())
+        self.assertTrue(output_path.is_file())
+
+    def test_markdown_pdf_rewrite_preserves_front_matter_and_fenced_code(self):
+        markdown_bytes = (
+            b'---\ntitle: Book\n---\n'
+            b'# Title\n\n---\n![[cover.jpg]]\n\n---\n## Section\n\n'
+            b'```markdown\n---\n![[example.jpg]]\n```\n'
+        )
+
+        prepared_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
+            markdown_bytes,
+        )
+
+        self.assertEqual(replaced_rules, 2)
+        self.assertTrue(prepared_markdown.startswith(b'---\ntitle: Book\n---\n'))
+        self.assertIn(b'\n***\n![[cover.jpg]]', prepared_markdown)
+        self.assertIn(b'```markdown\n---\n![[example.jpg]]\n```', prepared_markdown)
+
+        fenced_only = b'```markdown\n---\n![[example.jpg]]\n```\n\n---\n'
+        unchanged_markdown, replaced_rules = convert._prepare_markdown_pdf_source(
+            fenced_only,
+        )
+        self.assertEqual(unchanged_markdown, fenced_only)
+        self.assertEqual(replaced_rules, 0)
+
+    def test_markdown_pdf_temp_input_is_removed_when_pandoc_fails(self):
+        markdown_path = self.directory / 'Книга.md'
+        original_markdown = b'# Title\n\n---\n![[cover.jpg]]\n'
+        markdown_path.write_bytes(original_markdown)
+        output_path = self.directory / 'Книга.pdf'
+        temporary_inputs = []
+
+        def failing_run(command, **_kwargs):
+            input_path = Path(command[command.index('--output') - 1])
+            temporary_inputs.append(input_path)
+            self.assertTrue(input_path.is_file())
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr='simulated Pandoc failure',
+            )
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(markdown_path),
+            '--format',
+            'pdf',
+            '--output',
+            str(output_path),
+            '--mode',
+            'quiet',
+        ]):
+            with patch('convert.subprocess.run', side_effect=failing_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+                    convert.main()
+
+        self.assertEqual(markdown_path.read_bytes(), original_markdown)
+        self.assertFalse(temporary_inputs[0].exists())
+        self.assertIn('simulated Pandoc failure', stderr.getvalue())
+
     def test_output_rejects_unsupported_extension_before_overwriting_cover(self):
         source_path = self.directory / 'Книга.odt'
         source_path.write_bytes(b'')
@@ -634,6 +739,10 @@ class PandocFormatTests(unittest.TestCase):
                     self.assertEqual(len(commands), 1)
                     self.assertIn('--from=markdown', commands[0])
                     self.assertIn(f'--to={pandoc_writer}', commands[0])
+                    self.assertEqual(
+                        commands[0][commands[0].index('--output') - 1],
+                        str(input_path),
+                    )
                     output_path = Path(commands[0][commands[0].index('--output') + 1])
                     self.assertEqual(output_path, self.directory / f'{input_path.stem}.{output_format}')
                     self.assertTrue(output_path.is_file())

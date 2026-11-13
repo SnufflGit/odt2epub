@@ -176,6 +176,61 @@ def get_image_mime_type(ext):
 # Поддерживаемые расширения изображений для обложек
 SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.tiff', '.tif')
 
+MARKDOWN_HORIZONTAL_RULE_PATTERN = re.compile(rb'^ {0,3}---[ \t]*(\r?\n)?$')
+MARKDOWN_FENCE_PATTERN = re.compile(rb'^ {0,3}(`{3,}|~{3,})')
+MARKDOWN_FENCE_CLOSE_PATTERN = re.compile(rb'^ {0,3}(`+|~+)[ \t]*(?:\r?\n)?$')
+
+
+def _prepare_markdown_pdf_source(markdown_bytes):
+    lines = markdown_bytes.splitlines(keepends=True)
+    front_matter_end = 0
+    if lines:
+        first_line = lines[0][3:] if lines[0].startswith(b'\xef\xbb\xbf') else lines[0]
+        if re.fullmatch(rb'---[ \t]*(?:\r?\n)?', first_line):
+            for index, line in enumerate(lines[1:], start=1):
+                if re.fullmatch(rb'(?:---|\.\.\.)[ \t]*(?:\r?\n)?', line):
+                    front_matter_end = index + 1
+                    break
+
+    replace_indexes = []
+    has_obsidian_embed_rule = False
+    fence_marker = None
+    for index in range(front_matter_end, len(lines)):
+        line = lines[index]
+        if fence_marker is not None:
+            closing_fence = MARKDOWN_FENCE_CLOSE_PATTERN.match(line)
+            if (
+                closing_fence
+                and closing_fence.group(1)[0:1] == fence_marker[0:1]
+                and len(closing_fence.group(1)) >= len(fence_marker)
+            ):
+                fence_marker = None
+            continue
+
+        opening_fence = MARKDOWN_FENCE_PATTERN.match(line)
+        if opening_fence:
+            fence_marker = opening_fence.group(1)
+            continue
+
+        if MARKDOWN_HORIZONTAL_RULE_PATTERN.fullmatch(line):
+            replace_indexes.append(index)
+            next_index = index + 1
+            while next_index < len(lines) and not lines[next_index].strip():
+                next_index += 1
+            if (
+                next_index < len(lines)
+                and re.match(rb'^ {0,3}!\[\[', lines[next_index])
+            ):
+                has_obsidian_embed_rule = True
+
+    if not has_obsidian_embed_rule:
+        return markdown_bytes, 0
+
+    for index in replace_indexes:
+        lines[index] = re.sub(rb'^( {0,3})---', rb'\1***', lines[index], count=1)
+
+    return b''.join(lines), len(replace_indexes)
+
 SUPPORTED_EPUB_MEDIA_TYPES = {
     '.mp3': ('audio', 'audio/mpeg'),
     '.m4a': ('audio', 'audio/mp4'),
@@ -2165,9 +2220,51 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                     if not run_pandoc(pandoc_command):
                         return False
             else:
-                pandoc_command.extend([input_path, '--output', output_path])
-                if not run_pandoc(pandoc_command):
-                    return False
+                pandoc_input_path = input_path
+                if is_markdown and args.format == 'pdf':
+                    try:
+                        markdown_bytes = Path(input_path).read_bytes()
+                    except OSError as e:
+                        log_error(f'Не удалось прочитать Markdown-файл {input_path}: {e}')
+                        return False
+
+                    markdown_bytes, replaced_rules = _prepare_markdown_pdf_source(
+                        markdown_bytes,
+                    )
+                    if replaced_rules:
+                        try:
+                            with tempfile.TemporaryDirectory(
+                                prefix='odt2epub-markdown-',
+                            ) as temp_dir:
+                                pandoc_input_path = str(
+                                    Path(temp_dir) / Path(input_path).name
+                                )
+                                Path(pandoc_input_path).write_bytes(markdown_bytes)
+                                resource_paths = dict.fromkeys((
+                                    str(Path(input_path).parent),
+                                    os.getcwd(),
+                                ))
+                                pandoc_command.append(
+                                    f'--resource-path={os.pathsep.join(resource_paths)}'
+                                )
+                                pandoc_command.extend([
+                                    pandoc_input_path,
+                                    '--output',
+                                    output_path,
+                                ])
+                                if not run_pandoc(pandoc_command):
+                                    return False
+                        except OSError as e:
+                            log_error(f'Не удалось создать временную копию Markdown-файла: {e}')
+                            return False
+                    else:
+                        pandoc_command.extend([pandoc_input_path, '--output', output_path])
+                        if not run_pandoc(pandoc_command):
+                            return False
+                else:
+                    pandoc_command.extend([pandoc_input_path, '--output', output_path])
+                    if not run_pandoc(pandoc_command):
+                        return False
 
             if args.format == 'epub' and not attach_epub_media(
                 output_path,
