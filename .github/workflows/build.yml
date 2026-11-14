@@ -32,7 +32,9 @@ jobs:
             ffmpeg \
             texlive-xetex \
             texlive-latex-recommended \
-            fonts-dejavu-core
+            fonts-dejavu-core \
+            fontconfig \
+            dpkg-dev
 
       - name: Install Python dependencies
         run: |
@@ -57,7 +59,7 @@ jobs:
           mkdir -p "$package/tools/bin"
           cp -a build/pyinstaller/odt2epub/. "$package/"
 
-          for command in pandoc pdfinfo pdftotext pdftoppm qpdf ffmpeg xelatex; do
+          for command in pandoc pdfinfo pdftotext pdftoppm qpdf ffmpeg xelatex fc-cache fc-match; do
             cp -L -- "$(command -v "$command")" "$package/tools/bin/$command"
           done
           for tex_package in texlive-binaries texlive-xetex texlive-latex-base; do
@@ -100,16 +102,85 @@ jobs:
           chmod +x "$package/run.sh"
 
           cat > "$package/README.txt" <<'EOF'
-          Run the application with ./run.sh [arguments].
-          This archive includes the external command-line tools and TeX data.
-          On Linux, compatible system shared libraries may still be required.
+          After installing the Debian package, run: odt2epub [arguments].
+          The application and bundled tools are stored in /opt/odt2epub.
           EOF
 
-          tar -czf build/odt2epub-ubuntu.tar.gz -C build/package .
+          deb_root="$PWD/build/deb-root"
+          install_dir="$deb_root/opt/odt2epub"
+          architecture="$(dpkg --print-architecture)"
+          version="0.1.${GITHUB_RUN_NUMBER}"
+          dpkg --validate-version "$version"
+          mkdir -p "$install_dir" "$deb_root/usr/bin" "$deb_root/DEBIAN" build/debian
+          cp -a "$package/." "$install_dir/"
+
+          cat > "$deb_root/usr/bin/odt2epub" <<'EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          exec /opt/odt2epub/run.sh "$@"
+          EOF
+          chmod 0755 "$deb_root/usr/bin/odt2epub"
+
+          cat > build/debian/control <<EOF
+          Source: odt2epub
+          Section: utils
+          Priority: optional
+          Maintainer: odt2epub maintainers <noreply@github.com>
+
+          Package: odt2epub
+          Architecture: $architecture
+          Description: ODT, EPUB, Markdown, PDF and TXT converter
+           Command-line document converter with bundled external tools.
+          EOF
+
+          elf_files=()
+          while IFS= read -r -d '' candidate; do
+            if [[ "$(od -An -tx1 -N4 "$candidate" | tr -d ' \n')" == "7f454c46" ]]; then
+              elf_files+=("$candidate")
+            fi
+          done < <(find "$install_dir" -type f \
+            \( -perm /111 -o -name '*.so' -o -name '*.so.*' \) -print0)
+          if ((${#elf_files[@]} == 0)); then
+            echo "No ELF binaries found in the application bundle." >&2
+            exit 1
+          fi
+
+          shlib_args=()
+          for binary in "${elf_files[@]}"; do
+            shlib_args+=("-e$binary")
+          done
+          shlib_output="$(cd build && dpkg-shlibdeps -O -S"$deb_root" "${shlib_args[@]}")"
+          depends="${shlib_output#shlibs:Depends=}"
+          if [[ "$depends" == "$shlib_output" || -z "$depends" ]]; then
+            echo "Could not determine shared-library dependencies for the Debian package." >&2
+            exit 1
+          fi
+          for required_dependency in fontconfig perl; do
+            if ! grep -Eq "(^|, )${required_dependency}( \\(|,|$)" <<< "$depends"; then
+              depends+=", ${required_dependency}"
+            fi
+          done
+
+          cat > "$deb_root/DEBIAN/control" <<EOF
+          Package: odt2epub
+          Version: $version
+          Section: utils
+          Priority: optional
+          Architecture: $architecture
+          Maintainer: odt2epub maintainers <noreply@github.com>
+          Depends: $depends
+          Description: ODT, EPUB, Markdown, PDF and TXT converter
+           Command-line document converter with bundled external tools.
+          EOF
+          chmod 0755 "$deb_root/DEBIAN"
+          chmod 0644 "$deb_root/DEBIAN/control"
+
+          dpkg-deb --root-owner-group --build \
+            "$deb_root" "build/odt2epub_${version}_${architecture}.deb"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: odt2epub-ubuntu
-          path: build/odt2epub-ubuntu.tar.gz
+          name: odt2epub-ubuntu-deb
+          path: build/odt2epub_*.deb
           if-no-files-found: error
