@@ -1,0 +1,249 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu
+            runner: ubuntu-24.04
+          - platform: windows
+            runner: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pandoc \
+            poppler-utils \
+            qpdf \
+            ffmpeg \
+            texlive-xetex \
+            texlive-latex-recommended \
+            fonts-dejavu-core
+
+      - name: Install Windows tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install --no-progress -y pandoc poppler qpdf ffmpeg miktex
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Run tests
+        run: python -m unittest discover -v
+
+      - name: Build Linux application
+        if: runner.os == 'Linux'
+        run: |
+          python -m PyInstaller \
+            --clean \
+            --noconfirm \
+            --onedir \
+            --name odt2epub \
+            --distpath build/pyinstaller \
+            --workpath build/pyinstaller-work \
+            convert.py
+
+          package="$PWD/build/package"
+          mkdir -p "$package/tools/bin"
+          cp -a build/pyinstaller/odt2epub/. "$package/"
+
+          for command in pandoc pdfinfo pdftotext pdftoppm qpdf ffmpeg xelatex; do
+            cp -L -- "$(command -v "$command")" "$package/tools/bin/$command"
+          done
+          for tex_package in texlive-binaries texlive-xetex texlive-latex-base; do
+            while IFS= read -r executable; do
+              if [[ "$executable" == /usr/bin/* && -f "$executable" && -x "$executable" ]]; then
+                cp -L -- "$executable" "$package/tools/bin/$(basename "$executable")"
+              fi
+            done < <(dpkg-query -L "$tex_package")
+          done
+
+          mkdir -p "$package/tools/share" "$package/tools/etc" "$package/tools/var"
+          if [[ -d /usr/share/texlive ]]; then
+            cp -a /usr/share/texlive "$package/tools/share/"
+          fi
+          if [[ -d /etc/texmf ]]; then
+            cp -a /etc/texmf "$package/tools/etc/"
+          fi
+          if [[ -d /var/lib/texmf ]]; then
+            cp -a /var/lib/texmf "$package/tools/var/"
+          fi
+          if [[ -d /usr/share/fonts/truetype/dejavu ]]; then
+            mkdir -p "$package/tools/fonts"
+            cp -a /usr/share/fonts/truetype/dejavu/. "$package/tools/fonts/"
+            if [[ -f /usr/share/doc/fonts-dejavu-core/copyright ]]; then
+              cp /usr/share/doc/fonts-dejavu-core/copyright "$package/tools/fonts/COPYRIGHT.txt"
+            fi
+          fi
+
+          cat > "$package/run.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+          tools="$root/tools"
+          export PATH="$tools/bin:$PATH"
+          export TEXMFROOT="$tools/share/texlive"
+          export TEXMFCNF="$tools/etc/texmf:$tools/var/lib/texmf/web2c:$TEXMFROOT/texmf-dist/web2c"
+          export OSFONTDIR="$tools/fonts"
+          exec "$root/odt2epub" "$@"
+          EOF
+          chmod +x "$package/run.sh"
+
+          cat > "$package/README.txt" <<'EOF'
+          Run the application with ./run.sh [arguments].
+          This archive includes the external command-line tools and TeX data.
+          On Linux, compatible system shared libraries may still be required.
+          EOF
+
+          tar -czf build/odt2epub-ubuntu.tar.gz -C build/package .
+
+      - name: Build Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --clean `
+            --noconfirm `
+            --onedir `
+            --name odt2epub `
+            --distpath build/pyinstaller `
+            --workpath build/pyinstaller-work `
+            convert.py
+
+          $package = Join-Path $PWD "build/package"
+          $tools = Join-Path $package "tools"
+          New-Item -ItemType Directory -Force $package, $tools | Out-Null
+          Copy-Item "build/pyinstaller/odt2epub/*" $package -Recurse -Force
+
+          function Find-ToolExecutable([string]$name) {
+            $found = @(& where.exe "$name.exe" 2>$null) |
+              Where-Object { $_ -and $_ -notmatch '\\chocolatey\\bin\\' } |
+              Select-Object -First 1
+            if (-not $found) {
+              $roots = @($env:ProgramFiles, [Environment]::GetFolderPath("ProgramFilesX86"),
+                (Join-Path $env:ChocolateyInstall "lib"),
+                (Join-Path $env:LOCALAPPDATA "Programs")) | Where-Object { Test-Path $_ }
+              foreach ($root in $roots) {
+                $found = Get-ChildItem $root -Filter "$name.exe" -File -Recurse -ErrorAction SilentlyContinue |
+                  Select-Object -First 1 -ExpandProperty FullName
+                if ($found) { break }
+              }
+            }
+            if (-not $found) { throw "Could not locate $name.exe after installation." }
+            return $found
+          }
+
+          function Find-InstallRoot([string]$name, [string]$executable) {
+            $directory = Split-Path $executable
+            switch ($name) {
+              "pandoc" { return $directory }
+              "ffmpeg" { return $directory }
+              "poppler" {
+                while ($directory -and -not (Test-Path (Join-Path $directory "Library"))) {
+                  $directory = Split-Path $directory
+                }
+              }
+              "qpdf" {
+                while ($directory -and -not (Test-Path (Join-Path $directory "bin"))) {
+                  $directory = Split-Path $directory
+                }
+              }
+              "miktex" {
+                while ($directory -and -not (Test-Path (Join-Path $directory "miktex\bin"))) {
+                  $directory = Split-Path $directory
+                }
+              }
+            }
+            if (-not $directory -or -not (Test-Path $directory)) {
+              throw "Could not determine the installation directory for $name ($executable)."
+            }
+            return $directory
+          }
+
+          $specs = @(
+            @{ name = "pandoc"; command = "pandoc" },
+            @{ name = "poppler"; command = "pdftotext" },
+            @{ name = "qpdf"; command = "qpdf" },
+            @{ name = "ffmpeg"; command = "ffmpeg" },
+            @{ name = "miktex"; command = "xelatex" }
+          )
+          foreach ($spec in $specs) {
+            $executable = Find-ToolExecutable $spec.command
+            $sourceRoot = Find-InstallRoot $spec.name $executable
+            $destination = Join-Path $tools $spec.name
+            New-Item -ItemType Directory -Force $destination | Out-Null
+            Copy-Item (Join-Path $sourceRoot "*") $destination -Recurse -Force
+          }
+
+          $fontDirectory = Join-Path $tools "fonts"
+          New-Item -ItemType Directory -Force $fontDirectory | Out-Null
+          $fontArchive = Join-Path $PWD "build/dejavu-fonts.tar.bz2"
+          Invoke-WebRequest `
+            -Uri "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-2.37.tar.bz2" `
+            -OutFile $fontArchive
+          tar -xjf $fontArchive -C build
+          $fonts = Get-ChildItem "build/dejavu-fonts-2.37" -Filter "DejaVuSerif*.ttf" -File -Recurse
+          if (-not $fonts) { throw "DejaVu Serif fonts were not found in the downloaded font archive." }
+          Copy-Item $fonts.FullName $fontDirectory -Force
+          $fontLicense = Get-ChildItem "build/dejavu-fonts-2.37" -Filter "LICENSE*" -File -Recurse |
+            Select-Object -First 1
+          if ($fontLicense) {
+            Copy-Item $fontLicense.FullName (Join-Path $fontDirectory "LICENSE.txt") -Force
+          }
+
+          @'
+          @echo off
+          setlocal
+          set "ROOT=%~dp0"
+          set "PATH=%ROOT%tools\pandoc;%ROOT%tools\poppler\Library\bin;%ROOT%tools\qpdf\bin;%ROOT%tools\ffmpeg;%ROOT%tools\miktex\miktex\bin\x64;%PATH%"
+          set "OSFONTDIR=%ROOT%tools\fonts"
+          "%ROOT%odt2epub.exe" %*
+          '@ | Set-Content -Encoding ascii (Join-Path $package "run.bat")
+
+          @'
+          Run run.bat [arguments].
+          This archive includes the application and external command-line tools.
+          '@ | Set-Content -Encoding utf8 (Join-Path $package "README.txt")
+
+          Compress-Archive -Path "$package/*" -DestinationPath build/odt2epub-windows.zip
+
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: odt2epub-ubuntu
+          path: build/odt2epub-ubuntu.tar.gz
+          if-no-files-found: error
+
+      - name: Upload Windows artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: odt2epub-windows
+          path: build/odt2epub-windows.zip
+          if-no-files-found: error
