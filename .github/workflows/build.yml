@@ -257,3 +257,31 @@ jobs:
           name: odt2epub-flatpak
           path: build/odt2epub.flatpak
           if-no-files-found: error
+
+      - name: Prepare Snap sources
+        run: |
+          mkdir -p snap/build-input/app
+          cp -a build/pyinstaller/odt2epub/. snap/build-input/app/
+          cat > snap/build-input/odt2epub <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          export TEXMFCNF="$SNAP/etc/texmf/web2c:$SNAP/var/lib/texmf/web2c:$SNAP/usr/share/texlive/texmf-dist/web2c${TEXMFCNF:+:$TEXMFCNF}"
+          export OSFONTDIR="$SNAP/usr/share/fonts"
+          export FONTCONFIG_FILE="$SNAP/etc/fonts/fonts.conf"
+          exec "$SNAP/app/odt2epub" "$@"
+          EOF
+          chmod 0755 snap/build-input/odt2epub
+          sed -i "s/^version: .*/version: 0.1.${GITHUB_RUN_NUMBER}/" snap/snapcraft.yaml
+
+      - name: Build Snap package
+        id: snapcraft
+        uses: snapcore/action-build@v1
+        with:
+          path: snap
+
+      - name: Upload Snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: odt2epub-snap
+          path: ${{ steps.snapcraft.outputs.snap }}
+          if-no-files-found: error

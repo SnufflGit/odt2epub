@@ -1,0 +1,33 @@
+name: odt2epub
+base: core24
+version: "0.1.0"
+summary: Convert ODT, EPUB, Markdown, PDF and TXT documents
+description: |
+  Command-line document converter with Pandoc, Poppler, qpdf, FFmpeg and
+  XeLaTeX included in the Snap package.
+grade: stable
+confinement: strict
+
+apps:
+  odt2epub:
+    command: bin/odt2epub
+    plugs:
+      - home
+      - removable-media
+
+parts:
+  odt2epub:
+    plugin: dump
+    source: build-input
+    organize:
+      odt2epub: bin/odt2epub
+      app: app
+    stage-packages:
+      - pandoc
+      - poppler-utils
+      - qpdf
+      - ffmpeg
+      - texlive-xetex
+      - texlive-latex-recommended
+      - fonts-dejavu-core
+      - fontconfig

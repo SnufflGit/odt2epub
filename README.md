@@ -124,7 +124,7 @@ python convert.py --help
 
 ### Сборка артефактов
 
-GitHub Actions workflow [build.yml](./.github/workflows/build.yml) запускает тесты и собирает `.deb` и Flatpak-пакет для Linux. В оба пакета включаются приложение и внешние утилиты. `.deb` указывает зависимости от системных библиотек в metadata; для Flatpak используется runtime Freedesktop 24.08. Готовые файлы доступны в артефактах `odt2epub-ubuntu-deb` и `odt2epub-flatpak` успешного запуска workflow.
+GitHub Actions workflow [build.yml](./.github/workflows/build.yml) запускает тесты и собирает `.deb`, Flatpak и Snap для Linux. В пакеты включаются приложение и внешние утилиты. `.deb` указывает зависимости от системных библиотек в metadata; Flatpak использует runtime Freedesktop 24.08; Snap собирается для `core24` в strict confinement. Готовые файлы доступны в артефактах `odt2epub-ubuntu-deb`, `odt2epub-flatpak` и `odt2epub-snap` успешного запуска workflow.
 
 Установка `.deb`:
 
@@ -141,6 +141,14 @@ flatpak install --user --bundle ./odt2epub.flatpak
 ```
 
 Flatpak получает доступ к файловой системе хоста (`--filesystem=host`), чтобы CLI мог обрабатывать файлы в произвольных каталогах.
+
+Установка Snap-пакета, скачанного из Actions:
+
+```bash
+sudo snap install --dangerous ./odt2epub_*.snap
+```
+
+Snap получает доступ к файлам в домашнем каталоге и на подключённых съёмных носителях.
 
 ## ⚡ Быстрый старт
 
