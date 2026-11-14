@@ -124,7 +124,23 @@ python convert.py --help
 
 ### Сборка артефактов
 
-GitHub Actions workflow [build.yml](./.github/workflows/build.yml) запускает тесты и собирает `.deb` для Ubuntu. В пакет включаются приложение и внешние утилиты; зависимости от системных библиотек указываются в метаданных пакета. Установите скачанный пакет командой `sudo apt install ./odt2epub_*.deb`; результат будет доступен в артефакте `odt2epub-ubuntu-deb` успешного запуска workflow.
+GitHub Actions workflow [build.yml](./.github/workflows/build.yml) запускает тесты и собирает `.deb` и Flatpak-пакет для Linux. В оба пакета включаются приложение и внешние утилиты. `.deb` указывает зависимости от системных библиотек в metadata; для Flatpak используется runtime Freedesktop 24.08. Готовые файлы доступны в артефактах `odt2epub-ubuntu-deb` и `odt2epub-flatpak` успешного запуска workflow.
+
+Установка `.deb`:
+
+```bash
+sudo apt install ./odt2epub_*.deb
+```
+
+Для Flatpak добавьте Flathub и установите runtime и пакет:
+
+```bash
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.freedesktop.Platform//24.08
+flatpak install --user --bundle ./odt2epub.flatpak
+```
+
+Flatpak получает доступ к файловой системе хоста (`--filesystem=host`), чтобы CLI мог обрабатывать файлы в произвольных каталогах.
 
 ## ⚡ Быстрый старт
 

@@ -1,0 +1,17 @@
+app-id: io.github.snufflgit.odt2epub
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: odt2epub
+finish-args:
+  - --filesystem=host
+modules:
+  - name: odt2epub
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/odt2epub /app/bin
+      - cp -a . /app/lib/odt2epub/
+      - install -m 0755 /app/lib/odt2epub/flatpak-launcher /app/bin/odt2epub
+    sources:
+      - type: dir
+        path: ../build/flatpak-files

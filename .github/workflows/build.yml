@@ -34,7 +34,16 @@ jobs:
             texlive-latex-recommended \
             fonts-dejavu-core \
             fontconfig \
-            dpkg-dev
+            dpkg-dev \
+            flatpak \
+            flatpak-builder
+
+      - name: Install Flatpak SDK
+        run: |
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub \
+            org.freedesktop.Platform//24.08 \
+            org.freedesktop.Sdk//24.08
 
       - name: Install Python dependencies
         run: |
@@ -87,6 +96,15 @@ jobs:
               cp /usr/share/doc/fonts-dejavu-core/copyright "$package/tools/fonts/COPYRIGHT.txt"
             fi
           fi
+          cat > "$package/tools/fonts.conf" <<'EOF'
+          <?xml version="1.0"?>
+          <!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+          <fontconfig>
+            <dir prefix="relative">fonts</dir>
+            <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+            <cachedir prefix="xdg">fontconfig</cachedir>
+          </fontconfig>
+          EOF
 
           cat > "$package/run.sh" <<'EOF'
           #!/usr/bin/env bash
@@ -97,6 +115,10 @@ jobs:
           export TEXMFROOT="$tools/share/texlive"
           export TEXMFCNF="$tools/etc/texmf:$tools/var/lib/texmf/web2c:$TEXMFROOT/texmf-dist/web2c"
           export OSFONTDIR="$tools/fonts"
+          export FONTCONFIG_FILE="$tools/fonts.conf"
+          if [[ -d "$tools/lib" ]]; then
+            export LD_LIBRARY_PATH="$tools/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          fi
           exec "$root/odt2epub" "$@"
           EOF
           chmod +x "$package/run.sh"
@@ -178,9 +200,60 @@ jobs:
           dpkg-deb --root-owner-group --build \
             "$deb_root" "build/odt2epub_${version}_${architecture}.deb"
 
+          flatpak_files="$PWD/build/flatpak-files"
+          mkdir -p "$flatpak_files/lib"
+          cp -a "$package/." "$flatpak_files/"
+          for binary in "${elf_files[@]}"; do
+            ldd_output="$(ldd "$binary" 2>&1 || true)"
+            if grep -q 'not found' <<< "$ldd_output"; then
+              echo "Unresolved shared library while preparing Flatpak: $binary" >&2
+              echo "$ldd_output" >&2
+              exit 1
+            fi
+            while IFS= read -r library; do
+              library_name="$(basename "$library")"
+              case "$library_name" in
+                libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libresolv.so.*|libanl.so.*|libutil.so.*|libnss_*.so.*|ld-linux*.so.*)
+                  continue
+                  ;;
+              esac
+              resolved_library="$(readlink -f "$library")"
+              if [[ "$resolved_library" == "$install_dir"/* ]]; then
+                continue
+              fi
+              cp -L -- "$library" "$flatpak_files/lib/$library_name"
+            done < <(awk '$2 == "=>" && $3 ~ /^\// {print $3} $1 ~ /^\// {print $1}' <<< "$ldd_output")
+          done
+
+          cat > "$flatpak_files/flatpak-launcher" <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          export LD_LIBRARY_PATH="/app/lib/odt2epub/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec /app/lib/odt2epub/run.sh "$@"
+          EOF
+          chmod 0755 "$flatpak_files/flatpak-launcher"
+
+          mkdir -p build/flatpak/repo
+          flatpak-builder --user --force-clean \
+            --repo=build/flatpak/repo \
+            build/flatpak/build-dir \
+            flatpak/io.github.snufflgit.odt2epub.yml
+          flatpak build-bundle \
+            build/flatpak/repo \
+            build/odt2epub.flatpak \
+            io.github.snufflgit.odt2epub \
+            stable
+
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: odt2epub-ubuntu-deb
           path: build/odt2epub_*.deb
+          if-no-files-found: error
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: odt2epub-flatpak
+          path: build/odt2epub.flatpak
           if-no-files-found: error
