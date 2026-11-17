@@ -1621,6 +1621,8 @@ Metadata Stream: yes
             markdown = markdown_path.read_text(encoding='utf-8')
             self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
             self.assertIn('## Страница 1', markdown)
+            self.assertIn('**page2.png**', markdown)
+            self.assertIn('**page10.png**', markdown)
             self.assertIn(f'--resource-path={image_directory}', command)
             Path(command[command.index('--output') + 1]).write_bytes(self.epub_bytes)
 
@@ -1963,6 +1965,8 @@ Metadata Stream: yes
             markdown = markdown_path.read_text(encoding='utf-8')
             self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
             self.assertEqual(markdown.count('\\newpage'), 1)
+            self.assertIn('**page2.png**', markdown)
+            self.assertIn('**page10.png**', markdown)
             self.assertIn(f'--resource-path={image_directory}', command)
             self.assertIn('--to=pdf', command)
             self.assertIn('--pdf-engine=xelatex', command)
@@ -2192,17 +2196,54 @@ Metadata Stream: yes
         self.assertEqual(stdout.getvalue().strip(), 'Already.pdf — Already.pdf — ПРОПУЩЕНО')
         self.assertEqual(pdf_path.read_bytes(), b'original pdf')
 
+    def test_image_folder_can_be_converted_to_markdown_with_file_names(self):
+        image_directory = self.directory / 'Фотоальбом'
+        image_directory.mkdir()
+        (image_directory / 'page10.png').write_bytes(self.valid_image_bytes())
+        (image_directory / 'page2.png').write_bytes(self.valid_image_bytes())
+        output_path = self.directory / 'Фотоальбом.md'
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            markdown_path = Path(command[command.index('--output') - 1])
+            markdown = markdown_path.read_text(encoding='utf-8')
+            self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
+            self.assertIn('**page2.png**', markdown)
+            self.assertIn('**page10.png**', markdown)
+            self.assertIn('--to=md', command)
+            Path(command[command.index('--output') + 1]).write_text(
+                markdown,
+                encoding='utf-8',
+            )
+
+        with patch.object(sys, 'argv', [
+            'convert.py',
+            str(image_directory),
+            '--format',
+            'md',
+            '--input-formats',
+            'images',
+            '--no-timestamp',
+        ]):
+            with patch('convert.subprocess.run', side_effect=fake_run):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    convert.main()
+
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(output_path.is_file())
+
     def test_input_formats_reject_incompatible_source_output_pair(self):
         stderr = io.StringIO()
         with patch.object(sys, 'argv', [
-            'convert.py', '--format', 'md', '--input-formats', 'images',
+            'convert.py', '--format', 'txt', '--input-formats', 'images',
         ]):
             with redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as exit_context:
                     convert.main()
 
         self.assertEqual(exit_context.exception.code, 2)
-        self.assertIn('нельзя преобразовать в md', stderr.getvalue())
+        self.assertIn('нельзя преобразовать в txt', stderr.getvalue())
 
     def test_image_folder_respects_no_recursive(self):
         image_directory = self.directory / 'Pictures'
@@ -2544,6 +2585,8 @@ Metadata Stream: yes
             markdown_path = Path(command[command.index('--output') - 1])
             markdown = markdown_path.read_text(encoding='utf-8')
             self.assertLess(markdown.index('page2.png'), markdown.index('page10.png'))
+            self.assertIn('**page2.png**', markdown)
+            self.assertIn('**page10.png**', markdown)
             self.assertIn(f'--resource-path={image_directory}', command)
             self.assertIn('--to=odt', command)
             self.write_odt_with_images(

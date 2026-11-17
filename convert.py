@@ -2372,11 +2372,11 @@ def main():
         'txt': {'odt', 'epub', 'md', 'pdf', 'txt'},
         'pdf': {'odt', 'epub', 'md', 'pdf', 'txt'},
         'epub': {'odt', 'epub', 'md', 'pdf', 'txt'},
-        'images': {'odt', 'epub', 'pdf'},
+        'images': {'odt', 'epub', 'md', 'pdf'},
     }
 
     parser = argparse.ArgumentParser(
-        description='Конвертация документов ODT, Markdown, TXT, PDF и EPUB в поддерживаемые форматы; папок с изображениями — в EPUB, ODT или PDF',
+        description='Конвертация документов ODT, Markdown, TXT, PDF и EPUB в поддерживаемые форматы; папок с изображениями — в EPUB, ODT, Markdown или PDF',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Примеры:
@@ -3428,21 +3428,28 @@ _notes.odt или test_Draft.odt), автоматически пропускаю
                 for part in re.split(r'(\d+)', Path(image_path).relative_to(directory).as_posix())
             ],
         )
-        image_blocks = [
-            (
+        def escape_markdown_caption(filename):
+            return re.sub(r'([\\`*_[\]{}<>])', r'\\\1', filename)
+
+        image_blocks = []
+        for index, image_path in enumerate(image_paths, start=1):
+            relative_path = Path(image_path).relative_to(directory).as_posix()
+            heading = (
                 f'## Страница {index}\n\n'
                 if args.toc and args.format == 'epub'
                 else ''
             )
-            + f'![Страница {index}](<{Path(image_path).relative_to(directory).as_posix()}>)'
-            for index, image_path in enumerate(image_paths, start=1)
-        ]
+            image_markdown = (
+                f'![Страница {index}](<{relative_path}>)'
+                f'\n\n**{escape_markdown_caption(image_path.name)}**'
+            )
+            image_blocks.append(heading + image_markdown)
         if args.format == 'pdf':
             markdown = '\n\n\\newpage\n\n'.join(image_blocks) + '\n'
         else:
             markdown = '\n\n'.join(image_blocks) + '\n'
 
-        format_names = {'epub': 'EPUB', 'odt': 'ODT', 'pdf': 'PDF'}
+        format_names = {'epub': 'EPUB', 'odt': 'ODT', 'pdf': 'PDF', 'md': 'Markdown'}
         format_name = format_names[args.format]
         try:
             with tempfile.TemporaryDirectory(prefix='odt2epub-images-') as temp_dir:
